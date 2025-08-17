@@ -1,15 +1,15 @@
 # WSL2, Docker, and Kubernetes Setup Guide for Windows
 
-This guide walks you through setting up a local Kubernetes development environment on Windows using WSL2, Docker Desktop, kubectl, and minikube.
+This guide will help you set up a local Kubernetes development environment on Windows using WSL2, Docker Desktop, kubectl, and minikube. It also covers GPU support and running Ollama with GPU acceleration.
 
 ---
 
-## 1. Install WSL2 and Ubuntu
+## Install WSL2 and Ubuntu
 
 Open PowerShell and run:
     wsl --install -d Ubuntu
 
-## 2. Verify WSL Version
+## Verify WSL Version
 
 Check your WSL version:
     wsl -l -v
@@ -17,7 +17,7 @@ Check your WSL version:
 If Ubuntu is not using Version 2, set it:
     wsl --set-version Ubuntu 2
 
-## 3. Install Docker Desktop
+## Install Docker Desktop
 
 Download and install Docker Desktop for Windows. During installation, enable the WSL2 backend.
 
@@ -25,7 +25,7 @@ Verify Docker installation:
     docker --version
     docker run hello-world
 
-## 4. Install kubectl
+## Install kubectl
 
 Install kubectl using Windows Package Manager:
     winget install -e --id Kubernetes.kubectl
@@ -33,12 +33,12 @@ Install kubectl using Windows Package Manager:
 Verify installation:
     kubectl version --client
 
-## 5. Install minikube
+## Install minikube
 
 Install minikube:
     winget install -e --id Kubernetes.minikube
 
-## 6. Start a Local Kubernetes Cluster
+## Start a Local Kubernetes Cluster
 
 Start minikube with Docker as the driver:
     minikube start --driver=docker
@@ -87,3 +87,47 @@ Start Ollama:
 Check the API:
     curl http://localhost:11434/api/tags
     # Should return JSON (possibly empty until you pull a model)
+
+---
+
+## Pull and Test Ollama Models
+
+### a) Download a Small, Fast Model
+
+Pull a lightweight model for quick testing:
+    docker exec -it ollama ollama pull llama3.2:1b-instruct
+
+### b) Quick Generation Test via HTTP API
+
+Generate a response using the pulled model:
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{"model":"llama3.2:1b-instruct","prompt":"Say hello from the GPU."}'
+
+### c) Try Pulling Other Models
+
+Pull a larger model:
+    docker exec -it ollama ollama pull llama3:8b-instruct
+
+Or pull a very tiny smoke-test model:
+    docker exec -it ollama ollama pull tinyllama
+
+---
+
+## Test GPU Usage During Generation
+
+Open two WSL terminals:
+
+- **Terminal A:** Monitor GPU usage
+    watch -n 1 nvidia-smi
+
+- **Terminal B:** Trigger a longer generation
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "tinyllama",
+            "prompt": "Generate 3 short paragraphs explaining how GPUs speed up transformer inference. Mention attention, matrix multiply, and quantization.",
+            "options": { "num_predict": 512 }
+          }'
+
+---
