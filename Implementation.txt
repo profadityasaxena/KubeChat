@@ -1,0 +1,68 @@
+# Setting Up WSL2, Docker, and Kubernetes on Windows
+
+Follow these steps to set up a local Kubernetes development environment using WSL2, Docker Desktop, kubectl, and minikube.
+
+---
+
+## 1. Install WSL2 and Ubuntu
+
+Open PowerShell and run the following command to install WSL2 with Ubuntu:
+
+    wsl --install -d Ubuntu
+
+## 2. Verify WSL Version
+
+Check which version of WSL your Ubuntu distribution is using:
+
+    wsl -l -v
+
+If Ubuntu is not using Version 2, set it manually:
+
+    wsl --set-version Ubuntu 2
+
+## 3. Install Docker Desktop
+
+Download and install Docker Desktop for Windows. Make sure to enable the WSL2 backend during installation.
+
+After installation, verify Docker is working:
+
+    docker --version
+    docker run hello-world
+
+## 4. Install kubectl
+
+Use Windows Package Manager (winget) to install kubectl, the Kubernetes command-line tool:
+
+    winget install -e --id Kubernetes.kubectl
+
+Check the installation:
+
+    kubectl version --client
+
+## 5. Install minikube
+
+Install minikube, which lets you run a local Kubernetes cluster:
+
+    winget install -e --id Kubernetes.minikube
+
+## 6. Start a Local Kubernetes Cluster
+
+Start minikube using Docker as the driver:
+
+    minikube start --driver=docker
+
+Verify your cluster is running:
+
+    kubectl get nodes
+
+---
+
+You now have a local Kubernetes cluster running on Windows using WSL2 and Docker Desktop.
+
+# try the standard shim first
+nvidia-smi
+
+# if that isn't found, use the built-in WSL path:
+ls -l /usr/lib/wsl/lib/nvidia-smi
+/usr/lib/wsl/lib/nvidia-smi
+
