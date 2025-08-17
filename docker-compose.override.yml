@@ -1,0 +1,10 @@
+services:
+  web:
+    image: nginx:alpine
+    container_name: web
+    ports:
+      - "18080:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+    depends_on:
+      - rag-api

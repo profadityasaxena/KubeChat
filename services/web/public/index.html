@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>KubeChat – RAG UI</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 900px }
+  input, button, textarea { font-size: 1rem; }
+  .row { display: flex; gap: .5rem; margin: .5rem 0; flex-wrap: wrap }
+  label { min-width: 110px; font-weight: 600 }
+  pre { white-space: pre-wrap; background:#f6f6f6; padding:1rem; border-radius:.5rem }
+  .src { font-size:.9rem; color:#555 }
+</style>
+<h1>KubeChat – RAG UI</h1>
+
+<div class="row">
+  <label>API URL</label>
+  <input id="api" style="flex:1" value="http://localhost:8000" />
+</div>
+
+<div class="row">
+  <label>Question</label>
+  <input id="q" style="flex:1" placeholder="Ask something…" />
+</div>
+
+<div class="row">
+  <label>top_k</label>
+  <input id="topk" type="number" min="1" max="20" value="6" style="width:6rem" />
+  <label>num_predict</label>
+  <input id="npred" type="number" min="16" max="512" value="160" style="width:6rem" />
+</div>
+
+<div class="row">
+  <label>path_exact</label>
+  <input id="p_exact" style="flex:1" placeholder="e.g. 11.pdf (optional)" />
+</div>
+<div class="row">
+  <label>path_contains</label>
+  <input id="p_contains" style="flex:1" placeholder="e.g. Kubernetes (optional)" />
+</div>
+
+<div class="row">
+  <button id="ask" type="button">Ask</button>
+</div>
+
+<h3>Answer</h3>
+<pre id="out">(waiting)</pre>
+
+<h3>Log</h3>
+<pre id="log"></pre>
+
+<div id="sources"></div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const log = (msg) => { log.textContent += msg + "\\n"; console.log(msg); };
+
+  async function ask() {
+    const btn = ask;
+    btn.disabled = true;
+    out.textContent = "…thinking…";
+    sources.innerHTML = "";
+    log.textContent = "";
+
+    const api = api.value.trim().replace(/\\/+$/, "");
+    const body = {
+      question: q.value,
+      top_k: parseInt(topk.value, 10),
+      num_predict: parseInt(npred.value, 10),
+      num_gpu: 32
+    };
+    const pe = p_exact.value.trim();
+    const pc = p_contains.value.trim();
+    if (pe) body.path_exact = pe;
+    if (pc) body.path_contains = pc;
+
+    log("POST " + api + "/chat");
+    log("Body: " + JSON.stringify(body));
+
+    try {
+      const r = await fetch(api + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        mode: "cors",
+      });
+      log("Status: " + r.status + " " + r.statusText);
+
+      let data;
+      try {
+        data = await r.json();
+      } catch (e) {
+        const txt = await r.text();
+        log("Non-JSON response body: " + txt);
+        throw new Error("Server did not return JSON");
+      }
+
+      out.textContent = data.answer || "(no answer)";
+      if (Array.isArray(data.sources)) {
+        sources.innerHTML = <h4>Sources</h4> + data.sources
+          .map(s => <div class="src">•  (chunk ) — score: </div>)
+          .join("");
+      }
+    } catch (e) {
+      out.textContent = "Request failed.";
+      log("Error: " + (e && e.message ? e.message : e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  ask.addEventListener("click", ask);
+  log("UI loaded, click the Ask button after entering a question.");
+</script>
+</html>

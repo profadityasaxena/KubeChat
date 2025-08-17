@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=2m
+      - OLLAMA_NUM_PARALLEL=1
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]  # Docker Desktop Compose GPU
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  file-store:
+    image: nginx:alpine
+    container_name: file-store
+    ports:
+      - "8081:80"
+    volumes:
+      - ./docs:/usr/share/nginx/html:ro
+
+  rag-api:
+    build:
+      context: .
+      dockerfile: services/rag-api/Dockerfile
+    container_name: rag-api
+    env_file: .env
+    environment:
+      DOCS_DIR: /app/docs
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./docs:/app/docs:ro
+    depends_on:
+      - ollama
+      - qdrant
+      - file-store
+
+volumes:
+  ollama:
+  qdrant_storage:
