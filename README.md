@@ -91,6 +91,26 @@ The application combines a clean web interface with containerized orchestration 
 3. **Open the UI**  
      Navigate to [http://localhost:8000](http://localhost:8000) to access the KubeChat interface.
 
+## 🔍 Perplexity vs. KubeChat
+
+While KubeChat draws inspiration from AI search engines like **Perplexity**, its design goals and architecture are very different.  
+Here’s a side-by-side comparison:
+
+| Feature                | **Perplexity** | **KubeChat (this project)** |
+|-------------------------|----------------|-----------------------------|
+| **Models**             | Uses commercial + open LLM APIs (GPT-4, Claude, Mistral, Llama-2, etc.) | Runs models locally via **Ollama** inside Kubernetes (TinyLlama, Mistral, CodeLlama, or any you choose) |
+| **Knowledge Access**   | Live web search + retrieval with citations | Retrieval from **your PDFs/docs** via Qdrant vector database |
+| **Infrastructure**     | Fully managed SaaS (their cloud) | **Self-hosted** on Kubernetes (private, controllable, extensible) |
+| **Business Model**     | Pro subscription ($20/mo), reseller of upstream APIs | Showcase / developer platform; no API costs if using open weights |
+| **User Experience**    | Polished, consumer-grade search UI with collections and threads | Functional, developer-focused UI (showcases infra + RAG pipeline; customizable) |
+
+### ⚖️ Summary
+- **Perplexity**: A consumer-facing AI search engine, effectively reselling API access with a clean UX layer.  
+- **KubeChat**: A self-hosted RAG showcase — Ollama + Qdrant + Kubernetes — giving full control over models, data, and infrastructure.
+
+
 This project is for demonstration and showcase purposes only.
 No permission is granted to copy, distribute, or modify the codebase, in whole or in part.
 All rights reserved © 2025 Aditya Saxena.
+
+
