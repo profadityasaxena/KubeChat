@@ -3,138 +3,163 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>KubeChat – RAG Demo</title>
+  <title>KubeChat</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem auto; max-width: 900px; padding: 0 1rem; }
-    h1 { margin: 0 0 0.5rem; }
-    .row { display: grid; gap: .75rem; grid-template-columns: 1fr 1fr; }
-    .col { display: flex; flex-direction: column; gap: .5rem; }
-    label { font-size: .9rem; color: #444; }
-    textarea, input, select { width: 100%; box-sizing: border-box; padding: .6rem .7rem; border: 1px solid #ccc; border-radius: .5rem; font-size: 1rem; }
-    button { padding: .65rem 1rem; border: 0; border-radius: .5rem; background: #0ea5e9; color: white; font-weight: 600; cursor: pointer; }
-    button:disabled { opacity: .6; cursor: default; }
-    .status { font-size: .9rem; color: #555; margin-top: .5rem; min-height: 1.2em; }
-    .card { background: #fafafa; border: 1px solid #eee; border-radius: .75rem; padding: 1rem; }
-    .sources li { margin: .25rem 0; }
-    code { background: #f3f3f3; padding: .1rem .3rem; border-radius: .3rem; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin: 0 0 0.5rem 0; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    textarea, input, button { width: 100%; padding: .6rem .7rem; font-size: 1rem; }
+    textarea { min-height: 120px; }
+    button { cursor: pointer; }
+    .small { font-size: .9rem; color: #555; }
+    .muted { color: #777; }
+    .ok { color: #0a0; }
+    .bad { color: #b00; }
+    .card { border: 1px solid #eee; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+    .sources { margin-top: .5rem; }
+    code { background: #f6f6f6; padding: .2rem .35rem; border-radius: 4px; }
   </style>
 </head>
 <body>
   <h1>KubeChat</h1>
-  <p class="status" id="health">Checking API…</p>
+  <div id="health" class="small muted">API: checking…</div>
 
-  <div class="row">
-    <div class="col">
-      <label for="q">Question</label>
-      <textarea id="q" rows="5" placeholder="Ask something about your PDFs…"></textarea>
-    </div>
-    <div class="col">
-      <label for="pathExact">Filter by filename (optional)</label>
-      <input id="pathExact" placeholder="e.g., 11.pdf (exact match)" />
-
-      <label class="small" for="pathContains">Or substring filter (optional)</label>
-      <input id="pathContains" placeholder='e.g., "Kubernetes Direction" (substring)' />
-
-      <div class="row">
-        <div class="col">
-          <label for="topK">Top K</label>
-          <select id="topK">
-            <option>4</option><option selected>6</option><option>8</option><option>10</option>
-          </select>
-        </div>
-        <div class="col">
-          <label for="numPredict">Max tokens</label>
-          <select id="numPredict">
-            <option>80</option><option selected>160</option><option>256</option><option>512</option>
-          </select>
-        </div>
-      </div>
-      <button id="askBtn">Ask</button>
-      <div class="status" id="status"></div>
-    </div>
-  </div>
-
-  <h3>Answer</h3>
   <div class="card">
-    <pre id="answer" style="white-space: pre-wrap; margin: 0;"></pre>
+    <label for="q"><strong>Question</strong></label>
+    <textarea id="q" placeholder="Ask something about your PDFs… e.g. 'What is Kubernetes used for?'"></textarea>
+
+    <div class="row" style="margin-top:.5rem">
+      <div>
+        <label for="path_contains" class="small">Path contains (optional)</label>
+        <input id="path_contains" placeholder="e.g. 11.pdf or Kubernetes" />
+      </div>
+      <div>
+        <label for="path_exact" class="small">Path exact (optional)</label>
+        <input id="path_exact" placeholder="e.g. 11.pdf" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:.5rem">
+      <div>
+        <label for="top_k" class="small">top_k</label>
+        <input id="top_k" type="number" value="6" min="1" max="50" />
+      </div>
+      <div>
+        <label for="num_predict" class="small">num_predict</label>
+        <input id="num_predict" type="number" value="160" min="1" max="2048" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:.5rem">
+      <div>
+        <label for="num_gpu" class="small">num_gpu</label>
+        <input id="num_gpu" type="number" value="32" min="1" max="64" />
+      </div>
+      <div class="small muted" style="display:flex;align-items:flex-end">
+        Tip: leave <code>path_contains</code> empty to search all files.
+      </div>
+    </div>
+
+    <div style="margin-top:.75rem; display:flex; gap:.5rem">
+      <button id="ask">Ask</button>
+      <button id="reingest" title="Scan /app/docs and rebuild the index">Re-ingest</button>
+      <div id="status" class="small muted" style="margin-left:.5rem"></div>
+    </div>
   </div>
 
-  <h3>Sources</h3>
-  <ul id="sources" class="sources"></ul>
+  <div id="answer" class="card" style="display:none"></div>
+  <div id="sources" class="card" style="display:none"></div>
 
   <script>
-    const API = "http://localhost:8000";
-    const els = {
-      health:  document.getElementById("health"),
-      q:       document.getElementById("q"),
-      pathEx:  document.getElementById("pathExact"),
-      pathSub: document.getElementById("pathContains"),
-      topK:    document.getElementById("topK"),
-      numPred: document.getElementById("numPredict"),
-      ask:     document.getElementById("askBtn"),
-      status:  document.getElementById("status"),
-      answer:  document.getElementById("answer"),
-      sources: document.getElementById("sources"),
-    };
+    const API = 'http://localhost:8000';
 
     async function checkHealth() {
       try {
-        const r = await fetch(API + "/health");
-        if (!r.ok) throw new Error();
-        const j = await r.json();
-        els.health.textContent = "API: " + (j.status || "ok");
+        const r = await fetch(API + '/health');
+        const ok = r.ok;
+        document.getElementById('health').textContent = 'API: ' + (ok ? 'ok' : 'unreachable');
+        document.getElementById('health').className = 'small ' + (ok ? 'ok' : 'bad');
       } catch {
-        els.health.textContent = "API not reachable at " + API + " — keep the stack running.";
+        document.getElementById('health').textContent = 'API: unreachable';
+        document.getElementById('health').className = 'small bad';
       }
     }
-
-    function setBusy(b, msg="") {
-      els.ask.disabled = b;
-      els.status.textContent = msg;
-    }
-
-    function renderAnswer(text, sources) {
-      els.answer.textContent = text || "";
-      els.sources.innerHTML = "";
-      (sources || []).forEach(s => {
-        const li = document.createElement("li");
-        li.textContent = `${s.path || "(unknown)"}  •  chunk ${s.chunk_id}  •  score ${Number(s.score).toFixed(3)}`;
-        els.sources.appendChild(li);
-      });
-    }
-
-    async function ask() {
-      const body = {
-        question:    els.q.value.trim(),
-        top_k:       parseInt(els.topK.value, 10),
-        num_predict: parseInt(els.numPred.value, 10),
-        num_gpu:     32
-      };
-      const ex = els.pathEx.value.trim();
-      const sub = els.pathSub.value.trim();
-      if (ex) body.path_exact = ex;
-      else if (sub) body.path_contains = sub;
-
-      if (!body.question) { els.status.textContent = "Type a question first."; return; }
-
-      setBusy(true, "Waiting…");
-      renderAnswer("", []);
-      try {
-        const r = await fetch(API + "/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const j = await r.json();
-        renderAnswer(j.answer, j.sources);
-        setBusy(false, "");
-      } catch (e) {
-        setBusy(false, "Request failed. Check that rag-api is running.");
-      }
-    }
-
-    els.ask.addEventListener("click", ask);
     checkHealth();
+
+    function setBusy(isBusy, msg='') {
+      const btn = document.getElementById('ask');
+      const ri  = document.getElementById('reingest');
+      btn.disabled = isBusy; ri.disabled = isBusy;
+      document.getElementById('status').textContent = msg || (isBusy ? 'working…' : '');
+    }
+
+    function showAnswer(text) {
+      const box = document.getElementById('answer');
+      box.style.display = 'block';
+      box.innerHTML = '<h3>Answer</h3><div>' + (text || '').replace(/\n/g,'<br/>') + '</div>';
+    }
+
+    function showSources(list) {
+      const box = document.getElementById('sources');
+      if (!list || !list.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = 'block';
+      const items = list.map(s => {
+        const p = s.path ?? '';
+        const id = (s.chunk_id ?? '');
+        const sc = (typeof s.score === 'number') ? s.score.toFixed(3) : s.score;
+        return '<li><code>' + p + '</code> (chunk ' + id + ', score ' + sc + ')</li>';
+      }).join('');
+      box.innerHTML = '<h3>Sources</h3><ul class="sources">' + items + '</ul>';
+    }
+
+    document.getElementById('ask').addEventListener('click', async () => {
+      const q  = document.getElementById('q').value.trim();
+      const pc = document.getElementById('path_contains').value.trim();
+      const pe = document.getElementById('path_exact').value.trim();
+      const top_k = parseInt(document.getElementById('top_k').value || '6', 10);
+      const num_predict = parseInt(document.getElementById('num_predict').value || '160', 10);
+      const num_gpu = parseInt(document.getElementById('num_gpu').value || '32', 10);
+
+      if (!q) { alert('Please type a question.'); return; }
+
+      const payload = { question: q, top_k, num_predict, num_gpu };
+      if (pe) payload.path_exact = pe;
+      if (pc) payload.path_contains = pc;
+
+      setBusy(true, 'waiting…');
+      showAnswer(''); showSources([]);
+
+      try {
+        const r = await fetch(API + '/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(JSON.stringify(data));
+        showAnswer(data.answer || '(no answer)');
+        showSources(data.sources || []);
+        setBusy(false, '');
+      } catch (e) {
+        console.error(e);
+        showAnswer('Request failed. See console for details.');
+        setBusy(false, 'error');
+      }
+    });
+
+    document.getElementById('reingest').addEventListener('click', async () => {
+      setBusy(true, 're-ingesting…');
+      try {
+        const r = await fetch(API + '/ingest', { method: 'POST' });
+        const data = await r.json();
+        document.getElementById('status').textContent = 'indexed files: ' + data.files_indexed + ', chunks: ' + data.chunks_indexed;
+      } catch (e) {
+        console.error(e);
+        document.getElementById('status').textContent = 're-ingest failed';
+      } finally {
+        setBusy(false, '');
+      }
+    });
   </script>
 </body>
 </html>

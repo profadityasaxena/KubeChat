@@ -1,10 +1,9 @@
 services:
-  web:
-    image: nginx:alpine
-    container_name: web
-    ports:
-      - "18080:80"
-    volumes:
-      - ./web:/usr/share/nginx/html:ro
+  rag-api:
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      QDRANT_URL: http://qdrant:6333
+      DOCS_DIR: /app/docs
     depends_on:
-      - rag-api
+      - ollama
+      - qdrant
