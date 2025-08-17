@@ -1,0 +1,236 @@
+# Windows Local Kubernetes & Ollama GPU Setup Guide
+
+This guide walks you through setting up a modern Kubernetes development environment on Windows using WSL2, Docker Desktop, kubectl, and minikube. It also covers enabling GPU acceleration for AI workloads with Ollama. Each step includes clear instructions and explanations.
+
+---
+
+## 1. Install WSL2 and Ubuntu
+
+Windows Subsystem for Linux (WSL2) lets you run Linux on Windows efficiently.  
+**To install Ubuntu on WSL2:**
+
+Open PowerShell and run:
+    wsl --install -d Ubuntu
+
+---
+
+## 2. Verify and Set WSL Version
+
+Ensure Ubuntu is using WSL2 for best compatibility.
+
+Check your WSL version:
+    wsl -l -v
+
+If Ubuntu is not on Version 2, set it:
+    wsl --set-version Ubuntu 2
+
+---
+
+## 3. Install Docker Desktop
+
+Docker Desktop provides container support and integrates with WSL2.
+
+- Download and install Docker Desktop for Windows.
+- During installation, enable the WSL2 backend.
+
+Verify Docker installation:
+    docker --version
+    docker run hello-world
+
+---
+
+## 4. Install kubectl
+
+kubectl is the Kubernetes command-line tool.
+
+Install using Windows Package Manager:
+    winget install -e --id Kubernetes.kubectl
+
+Verify installation:
+    kubectl version --client
+
+---
+
+## 5. Install minikube
+
+Minikube lets you run a local Kubernetes cluster.
+
+Install minikube:
+    winget install -e --id Kubernetes.minikube
+
+---
+
+## 6. Start a Local Kubernetes Cluster
+
+Start minikube using Docker as the driver:
+    minikube start --driver=docker
+
+Verify your cluster is running:
+    kubectl get nodes
+
+---
+
+## 7. Enable GPU Support in WSL2
+
+To use your NVIDIA GPU in WSL2:
+
+Check for GPU availability:
+    nvidia-smi
+
+If not found, try:
+    ls -l /usr/lib/wsl/lib/nvidia-smi
+    /usr/lib/wsl/lib/nvidia-smi
+
+---
+
+## 8. Verify Docker-WSL Integration
+
+Check Docker contexts to confirm WSL2 integration:
+    docker context ls
+
+You should see a context like `desktop-linux` (the default is marked with *).
+
+---
+
+## 9. Test GPU Access in Docker
+
+Run a CUDA test container to confirm GPU access:
+    docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+
+---
+
+## 10. Run Ollama in Docker with GPU Acceleration
+
+Ollama enables fast, local LLM inference with GPU support.
+
+Start Ollama:
+    docker run --gpus=all -d \
+      -p 11434:11434 \
+      -v ollama:/root/.ollama \
+      --name ollama \
+      ollama/ollama
+
+Check the API:
+    curl http://localhost:11434/api/tags
+
+You should get JSON output (empty until you pull a model).
+
+---
+
+## 11. Pull and Test Ollama Models
+
+### a) Download a Small, Fast Model
+
+Pull a lightweight model for quick testing:
+    docker exec -it ollama ollama pull llama3.2:1b-instruct
+
+### b) Quick Generation Test
+
+Generate a response using the model:
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{"model":"llama3.2:1b-instruct","prompt":"Say hello from the GPU."}'
+
+### c) Try Other Models
+
+Pull a larger model:
+    docker exec -it ollama ollama pull llama3:8b-instruct
+
+Or a tiny smoke-test model:
+    docker exec -it ollama ollama pull tinyllama
+
+---
+
+## 12. Monitor GPU Usage During Generation
+
+Open two WSL terminals:
+
+- **Terminal A:** Monitor GPU usage
+    watch -n 1 nvidia-smi
+
+- **Terminal B:** Trigger a longer generation
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "tinyllama",
+            "prompt": "Generate 3 short paragraphs explaining how GPUs speed up transformer inference. Mention attention, matrix multiply, and quantization.",
+            "options": { "num_predict": 512 }
+          }'
+
+---
+
+## 13. Advanced: Full GPU Offload with Ollama
+
+Pull the quantized 8B model:
+    docker exec -it ollama ollama pull llama3:8b-instruct-q4_K_M
+
+Monitor GPU usage in Terminal A:
+    watch -n 1 nvidia-smi
+
+Trigger generation in Terminal B:
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "llama3:8b-instruct-q4_K_M",
+            "prompt": "In 3 concise bullets, explain how attention and matrix multiplication dominate transformer inference cost.",
+            "options": {
+              "num_gpu": 32,
+              "num_predict": 256
+            }
+          }'
+
+**Explanation:**  
+`options.num_gpu: 32` asks Ollama to offload up to 32 layers to the GPU (full offload for the 8B model). This is similar to llama.cpp’s “n-gpu-layers” and can be set via API options or Modelfile.
+
+---
+
+## 14. Signs of Success
+
+In Terminal A, you should see:
+
+- GPU-Util spike above 0%
+- A process named ollama under Processes
+
+Optionally, tail logs to see offload details:
+    docker logs -f ollama | grep -i offload
+
+---
+
+## 15. Advanced Ollama Container Tuning
+
+Stop and remove the current container:
+    docker rm -f ollama
+
+Run Ollama with tuned environment variables:
+    docker run --gpus=all -d \
+      -p 11434:11434 \
+      -v ollama:/root/.ollama \
+      --name ollama \
+      -e OLLAMA_KEEP_ALIVE=2m \
+      -e OLLAMA_FLASH_ATTENTION=true \
+      -e OLLAMA_NUM_PARALLEL=1 \
+      ollama/ollama
+
+---
+
+## 16. Troubleshooting & VRAM Management
+
+If VRAM is tight, reduce GPU layers:
+
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{"model":"llama3:8b-instruct-q4_K_M","prompt":"test","options":{"num_gpu":28,"num_predict":128}}'
+
+To free VRAM immediately:
+
+- List loaded models:
+    curl -s http://localhost:11434/api/ps | jq
+
+- Unload a specific model:
+    curl -s http://localhost:11434/api/unload -d '{"model":"llama3:8b-instruct-q4_K_M"}'
+
+---
+
+## 🎉 You’re Ready!
+
+You now have a fully functional local Kubernetes environment with GPU-accelerated Ollama for fast LLM inference. Monitor your GPU usage and experiment with different models and settings for optimal performance.
