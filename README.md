@@ -14,6 +14,7 @@ The application combines a clean web interface with containerized orchestration 
 - Support re-ingestion of documents for dynamic knowledge updates.  
 
 ---
+
 ## 🔍 Perplexity vs. KubeChat
 
 While KubeChat draws inspiration from AI search engines like **Perplexity**, its design goals and architecture are very different.  
@@ -97,7 +98,7 @@ Here’s a side-by-side comparison:
 1. **Build and Run with Docker**  
      ```bash
      docker build -t kubechat .
-     docker run -p 8000:8000 kubechat
+     docker run -p 18080:18080 kubechat
      ```
 
 2. **Kubernetes Deployment (example with Minikube)**
@@ -107,11 +108,43 @@ Here’s a side-by-side comparison:
      ```
 
 3. **Open the UI**  
-     Navigate to [http://localhost:8000](http://localhost:8000) to access the KubeChat interface.
+     Navigate to 👉 [http://localhost:18080](http://localhost:18080) to access the KubeChat interface.
 
+---
+
+## API Examples
+
+**Health Check**
+```powershell
+Invoke-RestMethod http://localhost:18080/health
+
+## Re-ingest Documents
+Invoke-RestMethod -Method Post http://localhost:18080/ingest
+
+## Simple Q&A
+$body = @{
+  question    = "What is Kubernetes used for?"
+  top_k       = 6
+  num_predict = 160
+  num_gpu     = 32
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Uri http://localhost:18080/chat -Method Post -ContentType 'application/json' -Body $body
+
+## File Specify Q&A
+$body = @{
+  question    = "Summarize this paper in 3 bullets."
+  top_k       = 6
+  num_predict = 160
+  num_gpu     = 32
+  path_exact  = "11.pdf"
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Uri http://localhost:18080/chat -Method Post -ContentType 'application/json' -Body $body
+
+## License
 
 This project is for demonstration and showcase purposes only.
 No permission is granted to copy, distribute, or modify the codebase, in whole or in part.
+
 All rights reserved © 2025 Aditya Saxena.
-
-
