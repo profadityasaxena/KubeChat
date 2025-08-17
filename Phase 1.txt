@@ -1,0 +1,318 @@
+PHASE 1 — GPU-READY LOCAL KUBERNETES LAB ON WINDOWS
+(WSL2 + Docker Desktop + kubectl + Minikube + Ollama)
+
+GOAL
+-----
+Stand up a modern, reproducible local lab on Windows that:
+• Runs Kubernetes locally (minikube via Docker Desktop + WSL2)
+• Verifies end-to-end NVIDIA GPU acceleration from WSL2 → Docker
+• Serves an Ollama API container accelerated by your GPU
+• Provides clear, copy-pasteable commands and troubleshooting notes
+
+AUDIENCE & EXPECTED DURATION
+-----------------------------
+• Windows 11 users with admin rights
+• NVIDIA GPU recommended (RTX/Quadro/Datacenter)
+• 30–60 minutes for first-time setup
+
+PREREQUISITES (READ FIRST)
+--------------------------
+• BIOS/UEFI: Enable virtualization (Intel VT-x / AMD-V)
+• Windows Features: “Windows Subsystem for Linux” and “Virtual Machine Platform”
+• NVIDIA Windows Driver: Recent driver with WSL support installed on Windows
+• Internet access for installers and container images
+
+TIP: Use an elevated PowerShell (Run as Administrator) for Windows steps.
+
+---------------------------------------------------------------------------
+INSTALL & VERIFY FOUNDATIONS
+---------------------------------------------------------------------------
+
+Install WSL2 and Ubuntu
+-----------------------
+Windows Subsystem for Linux (WSL2) runs Linux efficiently on Windows.
+
+PowerShell (Admin):
+    wsl --install -d Ubuntu
+    wsl --set-default-version 2
+    wsl --status
+
+Launch Ubuntu from Start Menu (first launch finalizes setup).
+
+Inside Ubuntu (WSL):
+    sudo apt-get update && sudo apt-get -y upgrade
+    sudo apt-get -y install curl ca-certificates jq
+
+Verify WSL version mapping:
+PowerShell:
+    wsl -l -v
+(Ensure your Ubuntu distro shows “VERSION 2”. To convert:)
+    wsl --set-version Ubuntu 2
+
+GPU Visibility in WSL2
+----------------------
+Inside Ubuntu (WSL):
+    nvidia-smi
+
+If not found, try:
+    ls -l /usr/lib/wsl/lib/nvidia-smi
+    /usr/lib/wsl/lib/nvidia-smi
+
+If GPU is still not visible:
+• Ensure latest NVIDIA Windows driver is installed
+• Update WSL kernel: PowerShell →  wsl --update  then restart WSL:  wsl --shutdown
+
+Install Docker Desktop (WSL2 backend)
+-------------------------------------
+• Download & install Docker Desktop for Windows
+• During setup, enable: “Use the WSL 2 based engine”
+• In Docker Desktop → Settings → Resources → WSL Integration: enable for your Ubuntu distro
+
+Verify Docker from WSL:
+    docker --version
+    docker run hello-world
+
+Check Docker contexts:
+    docker context ls
+(Expect a context like “desktop-linux” with * on default)
+
+Install kubectl (Windows)
+-------------------------
+PowerShell:
+    winget install -e --id Kubernetes.kubectl
+
+Verify:
+    kubectl version --client
+
+Install minikube (Windows)
+--------------------------
+PowerShell:
+    winget install -e --id Kubernetes.minikube
+
+Optional default driver:
+    minikube config set driver docker
+
+Start a Local Kubernetes Cluster
+--------------------------------
+PowerShell:
+    minikube start --driver=docker
+
+Verify node:
+    kubectl get nodes
+Check cluster info:
+    kubectl cluster-info
+(Optionally open dashboard)
+    minikube dashboard --url
+
+---------------------------------------------------------------------------
+VERIFY GPU IN DOCKER & PREP FOR OLLAMA
+---------------------------------------------------------------------------
+
+Confirm GPU Access in Docker
+----------------------------
+Inside Ubuntu (WSL):
+    docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+
+Expected: A table with your GPU(s) and driver/runtime versions.
+
+Run Ollama (GPU) in Docker
+--------------------------
+Start the Ollama container (GPU enabled, persistent volume):
+    docker run --gpus=all -d \
+      -p 11434:11434 \
+      -v ollama:/root/.ollama \
+      --name ollama \
+      ollama/ollama
+
+Check the API:
+    curl http://localhost:11434/api/tags
+(Should return JSON; empty “models” until you pull one.)
+
+Pull and Test Models
+--------------------
+Lightweight smoke test:
+    docker exec -it ollama ollama pull tinyllama
+
+Small, fast instruction model:
+    docker exec -it ollama ollama pull llama3.2:1b-instruct
+
+Larger model (8B):
+    docker exec -it ollama ollama pull llama3:8b-instruct
+
+Quick generation test (1B instruct):
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{"model":"llama3.2:1b-instruct","prompt":"Say hello from the GPU."}'
+
+Monitor GPU usage while generating
+----------------------------------
+Open two WSL terminals.
+
+Terminal A (GPU monitor):
+    watch -n 1 nvidia-smi
+
+Terminal B (longer generation):
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "tinyllama",
+            "prompt": "Generate 3 short paragraphs explaining how GPUs speed up transformer inference. Mention attention, matrix multiply, and quantization.",
+            "options": { "num_predict": 512 }
+          }'
+
+Signs of success (Terminal A):
+• GPU-Util > 0%
+• Process “ollama” appears
+
+Check offload logs (optional):
+    docker logs -f ollama | grep -i offload
+
+Full/Deeper GPU Offload (Quantized 8B)
+--------------------------------------
+Pull quantized 8B:
+    docker exec -it ollama ollama pull llama3:8b-instruct-q4_K_M
+
+Generate with more GPU layers:
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "llama3:8b-instruct-q4_K_M",
+            "prompt": "In 3 concise bullets, explain how attention and matrix multiplication dominate transformer inference cost.",
+            "options": {
+              "num_gpu": 32,
+              "num_predict": 256
+            }
+          }'
+
+Explanation:
+• options.num_gpu (e.g., 32) requests deeper layer offload to GPU (akin to llama.cpp’s n-gpu-layers)
+
+Advanced Ollama Container Tuning
+--------------------------------
+Stop and replace container with tuned env:
+    docker rm -f ollama
+    docker run --gpus=all -d \
+      -p 11434:11434 \
+      -v ollama:/root/.ollama \
+      --name ollama \
+      -e OLLAMA_KEEP_ALIVE=2m \
+      -e OLLAMA_FLASH_ATTENTION=true \
+      -e OLLAMA_NUM_PARALLEL=1 \
+      ollama/ollama
+
+VRAM Management & Troubleshooting
+---------------------------------
+If VRAM is tight, reduce GPU layers:
+    curl http://localhost:11434/api/generate \
+      -H "Content-Type: application/json" \
+      -d '{"model":"llama3:8b-instruct-q4_K_M","prompt":"test","options":{"num_gpu":28,"num_predict":128}}'
+
+Inspect loaded models:
+    curl -s http://localhost:11434/api/ps | jq
+
+Unload a model:
+    curl -s http://localhost:11434/api/unload -H "Content-Type: application/json" \
+      -d '{"model":"llama3:8b-instruct-q4_K_M"}'
+
+Common errors & quick fixes:
+• “nvidia-container-cli: initialization error” → Ensure latest NVIDIA Windows driver, then PowerShell:  wsl --update  and  wsl --shutdown
+• “no CUDA-capable device is detected” → Verify  nvidia-smi  in both Windows (cmd/PowerShell) and Ubuntu (WSL)
+• Docker Desktop can’t see WSL distro → Enable it in Docker Desktop → Settings → Resources → WSL Integration
+• Minikube fails to start → Close other hypervisors; ensure Docker Desktop is running; try  minikube delete  then  minikube start --driver=docker
+
+---------------------------------------------------------------------------
+OPTIONAL KUBERNETES VALIDATION (MINIKUBE)
+---------------------------------------------------------------------------
+
+Confirm kubectl context:
+    kubectl config get-contexts
+    kubectl config use-context minikube
+
+Deploy a simple test app:
+    kubectl create deployment hello-kube --image=nginx:1.25-alpine
+    kubectl expose deployment hello-kube --port=80 --type=NodePort
+    kubectl get svc hello-kube
+
+Port-forward for local access:
+    kubectl port-forward deploy/hello-kube 8080:80
+(Browse http://localhost:8080 to see NGINX welcome.)
+
+Note: GPU scheduling inside minikube is a Phase 2 topic (requires the NVIDIA device plugin and driver exposure in the container runtime). In Phase 1 we validate GPU via Docker and serve Ollama locally.
+
+---------------------------------------------------------------------------
+CLEANUP & RESET
+---------------------------------------------------------------------------
+
+Stop port-forwards with Ctrl+C.
+
+Remove Ollama container and volume (keeps images):
+    docker rm -f ollama
+(If you also want to delete the persistent volume)
+    docker volume rm ollama
+
+Reset minikube:
+    minikube delete
+
+Restart WSL and Docker Desktop when making low-level changes:
+    wsl --shutdown
+    (then relaunch Docker Desktop)
+
+---------------------------------------------------------------------------
+PHASE 1 OUTCOME
+---------------------------------------------------------------------------
+
+You now have:
+• WSL2 + Ubuntu working with GPU visibility
+• Docker Desktop integrated with WSL2
+• A running local Kubernetes cluster (minikube)
+• A GPU-accelerated Ollama API reachable at http://localhost:11434
+• Verified generation load on your GPU and basic VRAM management
+
+This completes Phase 1: a GPU-ready local Kubernetes lab with a validated AI inference path via Ollama. Proceed to Phase 2 to schedule GPU workloads inside Kubernetes (NVIDIA device plugin, Kubernetes manifests for Ollama, persistent storage, and ingress).
+
+---------------------------------------------------------------------------
+APPENDIX — QUICK COMMANDS CHEAT SHEET
+---------------------------------------------------------------------------
+
+WSL & GPU
+  wsl --install -d Ubuntu
+  wsl --set-default-version 2
+  wsl --status
+  nvidia-smi
+  /usr/lib/wsl/lib/nvidia-smi
+
+Docker & Context
+  docker --version
+  docker run hello-world
+  docker context ls
+
+Minikube & Kubernetes
+  winget install -e --id Kubernetes.kubectl
+  winget install -e --id Kubernetes.minikube
+  minikube start --driver=docker
+  kubectl get nodes
+  kubectl cluster-info
+  minikube dashboard --url
+
+GPU Test in Docker
+  docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+
+Ollama (GPU)
+  docker run --gpus=all -d -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama
+  curl http://localhost:11434/api/tags
+  docker exec -it ollama ollama pull tinyllama
+  docker exec -it ollama ollama pull llama3.2:1b-instruct
+  docker exec -it ollama ollama pull llama3:8b-instruct-q4_K_M
+
+Generate (examples)
+  curl http://localhost:11434/api/generate \
+    -H "Content-Type: application/json" \
+    -d '{"model":"llama3.2:1b-instruct","prompt":"Say hello from the GPU."}'
+
+  curl http://localhost:11434/api/generate \
+    -H "Content-Type: application/json" \
+    -d '{"model":"llama3:8b-instruct-q4_K_M","prompt":"test","options":{"num_gpu":28,"num_predict":128}}'
+
+Monitoring
+  watch -n 1 nvidia-smi
+  docker logs -f ollama | grep -i offload

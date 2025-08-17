@@ -1,0 +1,414 @@
+PHASE 4 — ZERO-FRICTION BROWSER UI FOR YOUR RAG STACK
+(Static HTML + NGINX, no API changes, with optional docker-compose integration)
+
+GOAL
+-----
+Add a minimal browser UI to query your Phase 2/3 RAG API. You’ll type a question,
+optionally target a file (e.g., 11.pdf), and see the answer with sources. No API
+code changes are needed.
+
+OUTCOMES
+--------
+• One-file static web UI you can serve instantly with NGINX
+• Buttons for Ask and Re-ingest (trigger /chat and /ingest)
+• Optional docker-compose “web” service for a permanent slot in your stack
+
+PREREQUISITES
+-------------
+• Phases 1–3 complete and running via `docker compose up -d`
+• `rag-api` listening on http://localhost:8000
+• `ollama` and `qdrant` healthy
+• VS Code / PowerShell at the project root
+
+---------------------------------------------------------------------------
+A) SPIN UP A SUPER-SIMPLE UI WITHOUT TOUCHING COMPOSE
+---------------------------------------------------------------------------
+
+1) Create the static page (project root)
+----------------------------------------
+PowerShell:
+    New-Item -ItemType Directory -Force "services\web\public" | Out-Null
+    @"
+    <!doctype html>
+    <html lang="en">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>KubeChat – RAG UI</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 900px }
+      input, button, textarea { font-size: 1rem; }
+      .row { display: flex; gap: .5rem; margin: .5rem 0; flex-wrap: wrap }
+      label { min-width: 110px; font-weight: 600 }
+      pre { white-space: pre-wrap; background:#f6f6f6; padding:1rem; border-radius:.5rem }
+      .src { font-size:.9rem; color:#555 }
+    </style>
+    <h1>KubeChat – RAG UI</h1>
+
+    <div class="row">
+      <label>API URL</label>
+      <input id="api" style="flex:1" value="http://localhost:8000" />
+    </div>
+
+    <div class="row">
+      <label>Question</label>
+      <input id="q" style="flex:1" placeholder="Ask something…" />
+    </div>
+
+    <div class="row">
+      <label>top_k</label>
+      <input id="topk" type="number" min="1" max="20" value="6" style="width:6rem" />
+      <label>num_predict</label>
+      <input id="npred" type="number" min="16" max="512" value="160" style="width:6rem" />
+    </div>
+
+    <div class="row">
+      <label>path_exact</label>
+      <input id="p_exact" style="flex:1" placeholder="e.g. 11.pdf (optional)" />
+    </div>
+    <div class="row">
+      <label>path_contains</label>
+      <input id="p_contains" style="flex:1" placeholder="e.g. Kubernetes (optional)" />
+    </div>
+
+    <div class="row">
+      <button id="ask">Ask</button>
+    </div>
+
+    <h3>Answer</h3>
+    <pre id="out">(waiting)</pre>
+    <div id="sources"></div>
+
+    <script>
+      const $ = id => document.getElementById(id);
+      $("ask").onclick = async () => {
+        const api = $("api").value.trim().replace(/\/+$/,'');
+        const body = {
+          question: $("q").value,
+          top_k: parseInt($("topk").value, 10),
+          num_predict: parseInt($("npred").value, 10),
+          num_gpu: 32
+        };
+        const pe = $("p_exact").value.trim();
+        const pc = $("p_contains").value.trim();
+        if (pe) body.path_exact = pe;
+        if (pc) body.path_contains = pc;
+
+        $("out").textContent = "…thinking…";
+        $("sources").innerHTML = "";
+
+        try {
+          const r = await fetch(`${api}/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const data = await r.json();
+          $("out").textContent = data.answer || "(no answer)";
+          if (Array.isArray(data.sources)) {
+            $("sources").innerHTML = `<h4>Sources</h4>` + data.sources
+              .map(s => `<div class="src">• ${s.path} (chunk ${s.chunk_id}) — score: ${s.score?.toFixed?.(3) ?? s.score}</div>`)
+              .join("");
+          }
+        } catch (e) {
+          $("out").textContent = "Request failed: " + e;
+        }
+      };
+    </script>
+    </html>
+    "@ | Set-Content -Encoding UTF8 "services\web\public\index.html"
+
+2) Serve it instantly via NGINX (no compose edits)
+--------------------------------------------------
+    docker rm -f kubechat-web 2>$null
+    docker run -d --name kubechat-web -p 8080:80 `
+      -v "${PWD}\services\web\public:/usr/share/nginx/html:ro" `
+      nginx:alpine
+
+3) Test in your browser
+-----------------------
+Open:  http://localhost:8080
+• Type a question (e.g., “What is Kubernetes used for?”).
+• Optionally set path_exact to 11.pdf to target a specific file.
+• You should see an answer and a “Sources” list.
+
+---------------------------------------------------------------------------
+B) OPTIONAL: A SLEEKER UI WITH RE-INGEST BUTTON (single file)
+---------------------------------------------------------------------------
+
+If you prefer a slightly richer page (Ask + Re-ingest + health indicator),
+create this instead at the project root (choose this OR the simple one above):
+
+    New-Item -ItemType Directory -Force .\web | Out-Null
+    @'
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>KubeChat – RAG Demo</title>
+      <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem auto; max-width: 900px; padding: 0 1rem; }
+        h1 { margin: 0 0 0.5rem; }
+        .row { display: grid; gap: .75rem; grid-template-columns: 1fr 1fr; }
+        .col { display: flex; flex-direction: column; gap: .5rem; }
+        label { font-size: .9rem; color: #444; }
+        textarea, input, select { width: 100%; box-sizing: border-box; padding: .6rem .7rem; border: 1px solid #ccc; border-radius: .5rem; font-size: 1rem; }
+        button { padding: .65rem 1rem; border: 0; border-radius: .5rem; background: #0ea5e9; color: white; font-weight: 600; cursor: pointer; }
+        button:disabled { opacity: .6; cursor: default; }
+        .status { font-size: .9rem; color: #555; margin-top: .5rem; min-height: 1.2em; }
+        .card { background: #fafafa; border: 1px solid #eee; border-radius: .75rem; padding: 1rem; }
+        .sources li { margin: .25rem 0; }
+        code { background: #f3f3f3; padding: .1rem .3rem; border-radius: .3rem; }
+      </style>
+    </head>
+    <body>
+      <h1>KubeChat</h1>
+      <p class="status" id="health">Checking API…</p>
+
+      <div class="row">
+        <div class="col">
+          <label for="q">Question</label>
+          <textarea id="q" rows="5" placeholder="Ask something about your PDFs…"></textarea>
+        </div>
+        <div class="col">
+          <label for="pathExact">Filter by filename (optional)</label>
+          <input id="pathExact" placeholder="e.g., 11.pdf (exact match)" />
+
+          <label class="small" for="pathContains">Or substring filter (optional)</label>
+          <input id="pathContains" placeholder='e.g., "Kubernetes Direction" (substring)' />
+
+          <div class="row">
+            <div class="col">
+              <label for="topK">Top K</label>
+              <select id="topK">
+                <option>4</option><option selected>6</option><option>8</option><option>10</option>
+              </select>
+            </div>
+            <div class="col">
+              <label for="numPredict">Max tokens</label>
+              <select id="numPredict">
+                <option>80</option><option selected>160</option><option>256</option><option>512</option>
+              </select>
+            </div>
+          </div>
+          <button id="askBtn">Ask</button>
+          <button id="reingestBtn" title="Scan /app/docs and rebuild the index">Re-ingest</button>
+          <div class="status" id="status"></div>
+        </div>
+      </div>
+
+      <h3>Answer</h3>
+      <div class="card">
+        <pre id="answer" style="white-space: pre-wrap; margin: 0;"></pre>
+      </div>
+
+      <h3>Sources</h3>
+      <ul id="sources" class="sources"></ul>
+
+      <script>
+        const API = "http://localhost:8000";
+        const els = {
+          health:  document.getElementById("health"),
+          q:       document.getElementById("q"),
+          pathEx:  document.getElementById("pathExact"),
+          pathSub: document.getElementById("pathContains"),
+          topK:    document.getElementById("topK"),
+          numPred: document.getElementById("numPredict"),
+          ask:     document.getElementById("askBtn"),
+          reing:   document.getElementById("reingestBtn"),
+          status:  document.getElementById("status"),
+          answer:  document.getElementById("answer"),
+          sources: document.getElementById("sources"),
+        };
+
+        async function checkHealth() {
+          try {
+            const r = await fetch(API + "/health");
+            const j = await r.json();
+            els.health.textContent = "API: " + (j.status || "ok");
+          } catch {
+            els.health.textContent = "API not reachable at " + API + " — keep the stack running.";
+          }
+        }
+
+        function setBusy(b, msg="") { els.ask.disabled = b; els.reing.disabled = b; els.status.textContent = msg; }
+        function renderAnswer(text, sources) {
+          els.answer.textContent = text || "";
+          els.sources.innerHTML = "";
+          (sources || []).forEach(s => {
+            const li = document.createElement("li");
+            li.textContent = `${s.path || "(unknown)"}  •  chunk ${s.chunk_id}  •  score ${Number(s.score).toFixed(3)}`;
+            els.sources.appendChild(li);
+          });
+        }
+
+        async function ask() {
+          const body = {
+            question:    els.q.value.trim(),
+            top_k:       parseInt(els.topK.value, 10),
+            num_predict: parseInt(els.numPred.value, 10),
+            num_gpu:     32
+          };
+          const ex = els.pathEx.value.trim();
+          const sub = els.pathSub.value.trim();
+          if (ex) body.path_exact = ex;
+          if (sub) body.path_contains = sub;
+          if (!body.question) { els.status.textContent = "Type a question first."; return; }
+          setBusy(true, "Waiting…"); renderAnswer("", []);
+          try {
+            const r = await fetch(API + "/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            const j = await r.json();
+            renderAnswer(j.answer, j.sources);
+            setBusy(false, "");
+          } catch (e) { setBusy(false, "Request failed."); }
+        }
+
+        async function reingest() {
+          setBusy(true, "Re-indexing…");
+          try {
+            const r = await fetch(API + "/ingest", { method: "POST" });
+            const j = await r.json();
+            els.status.textContent = `indexed files: ${j.files_indexed}, chunks: ${j.chunks_indexed}`;
+          } catch (e) {
+            els.status.textContent = "re-ingest failed";
+          } finally { setBusy(false, ""); }
+        }
+
+        els.ask.addEventListener("click", ask);
+        els.reing.addEventListener("click", reingest);
+        checkHealth();
+      </script>
+    </body>
+    </html>
+    '@ | Set-Content -Encoding UTF8 .\web\index.html
+
+Serve this variant quickly:
+    docker rm -f kubechat-web 2>$null
+    docker run -d --name kubechat-web -p 8080:80 `
+      -v "${PWD}\web:/usr/share/nginx/html:ro" `
+      nginx:alpine
+
+Open:  http://localhost:8080
+
+---------------------------------------------------------------------------
+C) OPTIONAL: ADD “web” TO docker-compose.yml (permanent slot)
+---------------------------------------------------------------------------
+
+Append this service to your existing `docker-compose.yml` (supply ONE of the two volume mappings based on which UI path you kept):
+
+    web:
+      image: nginx:alpine
+      container_name: web
+      ports:
+        - "8080:80"
+      volumes:
+        # If you created services\web\public\index.html:
+        # - ./services/web/public:/usr/share/nginx/html:ro
+
+        # If you created .\web\index.html:
+        - ./web:/usr/share/nginx/html:ro
+      depends_on:
+        - rag-api
+
+Apply:
+    docker compose up -d web
+    docker compose ps
+
+Restart later:
+    docker compose restart web
+
+---------------------------------------------------------------------------
+D) SAFE REBUILD + FRESH INDEX (NO RE-DOWNLOAD OF MODELS)
+---------------------------------------------------------------------------
+
+1) Rebuild only the API image, then restart the container
+--------------------------------------------------------
+    docker compose build --no-cache rag-api
+    docker compose up -d rag-api
+
+2) Wipe the old Qdrant collection (ok if this 404s)
+---------------------------------------------------
+    Invoke-RestMethod -Method Delete http://localhost:6333/collections/docs -ErrorAction SilentlyContinue
+
+3) Wait for API readiness
+-------------------------
+    for ($i=0; $i -lt 60; $i++) {
+      try { Invoke-RestMethod http://localhost:8000/health *> $null; "READY"; break } catch {}
+      Start-Sleep -Milliseconds 500
+    }
+
+4) Re-ingest (large PDFs ok — no timeout)
+-----------------------------------------
+    Invoke-RestMethod -Method Post -TimeoutSec 0 http://localhost:8000/ingest
+
+5) Quick RAG smoke test
+-----------------------
+    $body = @{
+      question    = "What is Kubernetes used for?"
+      top_k       = 6
+      num_predict = 120
+      num_gpu     = 32
+    } | ConvertTo-Json
+    Invoke-RestMethod -Method Post http://localhost:8000/chat -ContentType "application/json" -Body $body
+
+(Optional) Target a single file:
+    $body = @{
+      question    = "Summarize this paper in 3 bullets."
+      top_k       = 6
+      num_predict = 160
+      num_gpu     = 32
+      path_exact  = "11.pdf"
+    } | ConvertTo-Json
+    Invoke-RestMethod -Method Post http://localhost:8000/chat -ContentType "application/json" -Body $body
+
+---------------------------------------------------------------------------
+E) TROUBLESHOOTING
+---------------------------------------------------------------------------
+
+• UI loads but requests fail → Ensure `rag-api` is running and reachable at http://localhost:8000
+• CORS errors → The API already enables `allow_origins=["*"]` in Phase 2; confirm you didn’t overwrite it
+• No sources returned → Re-ingest and verify documents exist inside the container:
+    docker exec -it rag-api sh -lc 'ls -R /app/docs'
+• PowerShell quote issues → When testing raw curl JSON, execute inside the container:
+    docker exec rag-api sh -lc 'curl -sS -H "Content-Type: application/json" \
+      --data-raw "{\"question\":\"What is Kubernetes used for?\",\"top_k\":4,\"num_predict\":120,\"num_gpu\":32}" \
+      http://127.0.0.1:8000/chat'
+
+---------------------------------------------------------------------------
+PHASE 4 OUTCOME
+---------------------------------------------------------------------------
+
+You now have a no-friction browser front-end for your RAG stack:
+• Zero backend changes, just a static page
+• Instant local serving via NGINX or a `web` compose service
+• Ask questions, filter by filename/substring, and re-ingest on demand
+
+NEXT (Phase 5): Package the UI + API behind a reverse proxy; add auth,
+and prepare Kubernetes manifests (Ingress, TLS, ConfigMaps) for the full stack.
+
+---------------------------------------------------------------------------
+QUICK COMMANDS (REFERENCE)
+---------------------------------------------------------------------------
+
+Create simple UI:
+  New-Item -ItemType Directory -Force "services\web\public" | Out-Null
+  # (write index.html as above)
+  docker rm -f kubechat-web 2>$null
+  docker run -d --name kubechat-web -p 8080:80 -v "${PWD}\services\web\public:/usr/share/nginx/html:ro" nginx:alpine
+
+Create richer UI:
+  New-Item -ItemType Directory -Force .\web | Out-Null
+  # (write index.html as above)
+  docker rm -f kubechat-web 2>$null
+  docker run -d --name kubechat-web -p 8080:80 -v "${PWD}\web:/usr/share/nginx/html:ro" nginx:alpine
+
+Compose add-on:
+  # add `web:` service to docker-compose.yml then:
+  docker compose up -d web
+  docker compose restart web
+
+Rebuild + reindex:
+  docker compose build --no-cache rag-api
+  docker compose up -d rag-api
+  Invoke-RestMethod -Method Delete http://localhost:6333/collections/docs -ErrorAction SilentlyContinue
+  Invoke-RestMethod -Method Post -TimeoutSec 0 http://localhost:8000/ingest

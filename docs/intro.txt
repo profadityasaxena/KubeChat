@@ -1,0 +1,1 @@
+Kubernetes automates deployment, scaling, and management of containers.

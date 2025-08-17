@@ -1,0 +1,317 @@
+PHASE 3 — PRODUCTION-LIKE VECTOR STACK WITH QDRANT
+(Standalone Qdrant + GPU Ollama + RAG API on a shared Docker network & Compose)
+
+GOAL
+-----
+Stand up a persistent vector database (Qdrant), wire it with your GPU-accelerated
+Ollama service and the rag-api microservice, and validate end-to-end ingestion
+and question-answering — first with single-container commands, then via Docker Compose.
+
+WHAT YOU’LL ACHIEVE
+-------------------
+• Clean, persistent Qdrant deployment for vector search
+• GPU-enabled Ollama reachable by service name
+• rag-api connected to both via a user-defined network
+• One-file docker-compose.yml to run the whole stack
+• Verified ingestion + chat round-trip against your ./docs folder
+
+PREREQUISITES
+-------------
+• Phase 1 (GPU-Ready Lab) and Phase 2 (rag-api) completed
+• Windows 11 + WSL2 + Docker Desktop
+• NVIDIA GPU visible in WSL2 (nvidia-smi works)
+• Project root contains: .env, ./docs/, services/rag-api/*
+
+TIP ON POWERSHELL QUOTING
+-------------------------
+PowerShell tends to mangle JSON quotes in curl -d/-Data. When in doubt, run curl
+inside the container using: docker exec <svc> sh -lc 'curl ...' so single quotes
+protect the JSON string.
+
+---------------------------------------------------------------------------
+A. STANDALONE SERVICES (SANITY CHECK BEFORE COMPOSE)
+---------------------------------------------------------------------------
+
+Qdrant — start fresh (ignore errors on rm)
+------------------------------------------
+PowerShell:
+    docker rm -f qdrant 2>$null
+    docker run -d --name qdrant `
+      -p 6333:6333 `
+      -v qdrant_storage:/qdrant/storage `
+      qdrant/qdrant:latest
+
+Health (server info at root):
+    Invoke-RestMethod http://localhost:6333/ | ConvertTo-Json -Depth 3
+
+Ollama — start GPU service (clean start)
+----------------------------------------
+    docker rm -f ollama 2>$null
+    docker run -d --name ollama `
+      --gpus all `
+      -p 11434:11434 `
+      -v ollama:/root/.ollama `
+      ollama/ollama
+
+API sanity:
+    curl http://localhost:11434/api/tags
+
+Put services on a shared network (ragnet)
+-----------------------------------------
+Create/attach:
+    docker network create ragnet 2>$null
+    docker network connect ragnet ollama
+    docker network connect ragnet qdrant
+    docker network connect ragnet rag-api   # (only if rag-api is already running)
+
+Verify network membership:
+    docker inspect -f "{{.Name}} -> {{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}" ollama qdrant rag-api
+
+Cross-service reachability (from rag-api)
+-----------------------------------------
+Expect JSON lines:
+    docker exec rag-api curl -s http://ollama:11434/api/tags | Select-Object -First 1
+    docker exec rag-api curl -s http://qdrant:6333/collections | Select-Object -First 1
+
+Add one tiny test document
+--------------------------
+    " Kubernetes is a container orchestration system that automates deployment, scaling, and management of containerized apps. " |
+      Set-Content -Encoding UTF8 .\docs\intro.txt
+
+    Get-ChildItem .\docs
+
+Pull the embedding model inside Ollama
+--------------------------------------
+    docker exec -it ollama ollama pull nomic-embed-text
+
+Ingest docs through rag-api
+---------------------------
+    Invoke-RestMethod -Method Post http://localhost:8000/ingest
+
+Expected:
+    {"files_indexed":1,"chunks_indexed":1}
+
+Ask a question against your index
+---------------------------------
+    $body = @{ question = "What is Kubernetes used for?"; top_k = 4; num_predict = 120; num_gpu = 32 } | ConvertTo-Json
+    Invoke-RestMethod -Method Post http://localhost:8000/chat -ContentType "application/json" -Body $body
+
+Expected: JSON with an answer + sources array (points to intro.txt).
+
+---------------------------------------------------------------------------
+B. DOCKER COMPOSE — ONE FILE TO RUN THE WHOLE STACK
+---------------------------------------------------------------------------
+
+Create docker-compose.yml at project root
+-----------------------------------------
+PowerShell:
+    @"
+    version: "3.9"
+
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        container_name: ollama
+        environment:
+          - OLLAMA_KEEP_ALIVE=2m
+          - OLLAMA_NUM_PARALLEL=1
+        ports:
+          - "11434:11434"
+        volumes:
+          - ollama:/root/.ollama
+        deploy:
+          resources:
+            reservations:
+              devices:
+                - capabilities: ["gpu"]  # Docker Desktop Compose GPU
+
+      qdrant:
+        image: qdrant/qdrant:latest
+        container_name: qdrant
+        ports:
+          - "6333:6333"
+        volumes:
+          - qdrant_storage:/qdrant/storage
+
+      file-store:
+        image: nginx:alpine
+        container_name: file-store
+        ports:
+          - "8081:80"
+        volumes:
+          - ./docs:/usr/share/nginx/html:ro
+
+      rag-api:
+        build:
+          context: .
+          dockerfile: services/rag-api/Dockerfile
+        container_name: rag-api
+        env_file: .env
+        environment:
+          DOCS_DIR: /app/docs
+        ports:
+          - "8000:8000"
+        volumes:
+          - ./docs:/app/docs:ro
+        depends_on:
+          - ollama
+          - qdrant
+          - file-store
+
+    volumes:
+      ollama:
+      qdrant_storage:
+    "@ | Set-Content -Encoding UTF8 docker-compose.yml
+
+    Get-Content docker-compose.yml | Select-Object -First 20
+
+Stop singles & bring up the full stack
+--------------------------------------
+    docker rm -f rag-api 2>$null
+    docker rm -f qdrant 2>$null
+    docker rm -f ollama 2>$null
+    docker rm -f file-store 2>$null
+
+    docker compose up -d --build
+    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+Smoke-test the three endpoints
+------------------------------
+    curl http://localhost:8000/health
+    curl http://localhost:6333/collections
+    curl http://localhost:11434/api/tags
+
+Pull models in the Compose-managed Ollama
+-----------------------------------------
+    docker exec -it ollama ollama pull nomic-embed-text
+    docker exec -it ollama ollama pull llama3:8b-instruct-q4_K_M
+
+Index what’s in ./docs
+----------------------
+    Get-ChildItem .\docs
+    Invoke-RestMethod -Method Post http://localhost:8000/ingest
+
+Connectivity checks from inside API
+-----------------------------------
+    docker exec rag-api curl -sSf http://ollama:11434/api/tags | Select-Object -First 1
+    docker exec rag-api curl -sSf http://qdrant:6333/collections | Select-Object -First 1
+
+Fast ingest trick (optional, keep it snappy)
+--------------------------------------------
+Temporarily move heavy PDFs, ingest small text first, then restore:
+    mkdir docs_hold 2>$null
+    Get-ChildItem .\docs -Recurse -Include *.pdf | Move-Item -Destination .\docs_hold -Force
+
+    "Kubernetes automates deployment, scaling, and management of containers." |
+      Set-Content -Encoding UTF8 .\docs\intro.txt
+
+    Get-ChildItem .\docs
+    Invoke-RestMethod -Method Post -TimeoutSec 0 http://localhost:8000/ingest
+
+Then bring PDFs back and re-run ingest:
+    Move-Item .\docs_hold\* .\docs -Force
+    Remove-Item .\docs_hold -Force
+    Invoke-RestMethod -Method Post -TimeoutSec 0 http://localhost:8000/ingest
+
+Ask a question (Compose runtime)
+--------------------------------
+PowerShell:
+    $body = @{
+      question    = "What is Kubernetes used for?"
+      top_k       = 4
+      num_predict = 120
+      num_gpu     = 32
+    } | ConvertTo-Json
+    Invoke-RestMethod -Method Post http://localhost:8000/chat -ContentType "application/json" -Body $body
+
+If PowerShell quoting misbehaves, run inside the container:
+    docker exec rag-api sh -lc 'curl -sS -H "Content-Type: application/json" \
+      --data-raw "{\"question\":\"What is Kubernetes used for?\",\"top_k\":4,\"num_predict\":120,\"num_gpu\":32}" \
+      http://127.0.0.1:8000/chat'
+
+---------------------------------------------------------------------------
+C. TROUBLESHOOTING & OPS
+---------------------------------------------------------------------------
+
+Service can’t see others
+------------------------
+• Ensure they share a network (Compose auto-creates one):
+    docker network ls
+    docker network inspect <compose_network_name> | findstr ollama
+• In .env and code, use service names:
+    OLLAMA_BASE_URL=http://ollama:11434
+    QDRANT_URL=http://qdrant:6333
+
+Ingestion returns 0 files
+-------------------------
+• Confirm mount:
+    docker exec -it rag-api sh -lc 'ls -R /app/docs'
+• Ensure file types are supported (.txt .md .pdf)
+
+Slow or stuck ingest with huge PDFs
+-----------------------------------
+• Use -TimeoutSec 0 on Invoke-RestMethod
+• Stage large PDFs back in batches
+• Consider OCR for scanned PDFs (pypdf can’t extract images-as-text)
+
+GPU not utilized
+----------------
+• Verify nvidia-smi spikes while generating
+• Use GPU-friendly model (e.g., llama3:8b-instruct-q4_K_M)
+• Check Ollama logs for offload:
+    docker logs -f ollama | Select-String -Pattern offload
+
+Health & logs
+-------------
+    curl http://localhost:8000/health
+    docker logs -f rag-api
+    docker logs -f qdrant
+    docker logs -f ollama
+
+Reset stack
+-----------
+    docker compose down
+    # Keep volumes (models & vectors), or remove to reset:
+    # docker volume rm ollama qdrant_storage
+
+---------------------------------------------------------------------------
+PHASE 3 OUTCOME
+---------------------------------------------------------------------------
+
+You now have a production-like vector stack:
+• Qdrant with persistent storage
+• GPU-accelerated Ollama reachable by service name
+• rag-api wired through a Compose network
+• Verified ingestion and grounded QA against ./docs
+
+NEXT (Phase 4): Kubernetes manifests for all three services (Deployments/Services),
+PersistentVolumes for Qdrant/Ollama, NVIDIA device plugin, and Ingress with TLS.
+
+---------------------------------------------------------------------------
+QUICK COMMANDS (REFERENCE)
+---------------------------------------------------------------------------
+
+Standalone sanity:
+  docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant:latest
+  docker run -d --name ollama --gpus all -p 11434:11434 -v ollama:/root/.ollama ollama/ollama
+  docker network create ragnet 2>$null
+  docker network connect ragnet ollama
+  docker network connect ragnet qdrant
+  docker network connect ragnet rag-api
+
+Compose:
+  docker compose up -d --build
+  docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+Models:
+  docker exec -it ollama ollama pull nomic-embed-text
+  docker exec -it ollama ollama pull llama3:8b-instruct-q4_K_M
+
+Ingest & chat:
+  Invoke-RestMethod -Method Post http://localhost:8000/ingest
+  $body = @{question="What is Kubernetes used for?"; top_k=4; num_predict=120; num_gpu=32} | ConvertTo-Json
+  Invoke-RestMethod -Method Post http://localhost:8000/chat -ContentType "application/json" -Body $body
+
+Inside container (quote-safe):
+  docker exec rag-api sh -lc 'curl -sS http://127.0.0.1:8000/health'
+  docker exec rag-api sh -lc 'curl -sS -H "Content-Type: application/json" --data-raw "{\"question\":\"What is Kubernetes used for?\",\"top_k\":4,\"num_predict\":120,\"num_gpu\":32}" http://127.0.0.1:8000/chat'

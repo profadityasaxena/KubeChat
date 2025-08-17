@@ -1,0 +1,374 @@
+PHASE 5 — MINIKUBE ROLLOUT OF THE RAG STACK
+(Qdrant + Ollama inside Kubernetes, connect from your existing rag-api/web on localhost)
+
+GOAL
+-----
+Deploy Qdrant and Ollama into your minikube cluster, verify they’re healthy from
+inside the cluster, and wire your existing local rag-api (Docker Compose) to them.
+Optionally deploy rag-api into Kubernetes and copy your ./docs into the pod for
+end-to-end Kubernetes only.
+
+OUTCOMES
+--------
+• Namespace + manifests for Qdrant and Ollama
+• PVC for Ollama models (persists across pod restarts)
+• Smoke tests from a curl pod and from your local machine
+• Clear remediation steps for common “Internal Server Error” cases
+
+PREREQS
+-------
+• minikube running (driver=docker)
+• kubectl context set to minikube
+• Namespace “kubechat” exists (AlreadyExists is fine)
+• Phases 1–4 completed; rag-api reachable at http://localhost:8000
+
+TIP: Keep your Compose stack up for rag-api/web and move only Qdrant+Ollama into k8s first.
+
+
+===============================================================================
+A) CLUSTER BOOTSTRAP
+===============================================================================
+
+Create & target namespace (idempotent)
+--------------------------------------
+kubectl create namespace kubechat 2>$null
+kubectl config set-context --current --namespace kubechat
+
+Quick sanity
+------------
+kubectl get nodes
+kubectl get ns | findstr kubechat
+
+
+===============================================================================
+B) DEPLOY QDRANT (VECTOR DB)
+===============================================================================
+
+Create manifest
+---------------
+New-Item -ItemType Directory -Force .\k8s | Out-Null
+
+@"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+      - name: qdrant
+        image: qdrant/qdrant:latest
+        ports:
+        - containerPort: 6333
+        env:
+        - name: QDRANT__SERVICE__HTTP_PORT
+          value: "6333"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+spec:
+  selector:
+    app: qdrant
+  ports:
+  - name: http
+    port: 6333
+    targetPort: 6333
+"@ | Set-Content -Encoding UTF8 .\k8s\qdrant.yaml
+
+Apply & watch
+-------------
+kubectl apply -f .\k8s\qdrant.yaml
+kubectl get pods -w
+# Ctrl+C once qdrant-... is Running
+
+Service check
+-------------
+kubectl get svc qdrant
+
+
+===============================================================================
+C) DEPLOY OLLAMA (MODELS PVC + SERVICE)
+===============================================================================
+
+Create manifest with PVC
+------------------------
+@"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+      - name: ollama
+        image: ollama/ollama:latest
+        ports:
+        - containerPort: 11434
+        env:
+        - name: OLLAMA_HOST
+          value: "0.0.0.0:11434"
+        volumeMounts:
+        - name: models
+          mountPath: /root/.ollama
+        readinessProbe:
+          httpGet:
+            path: /api/tags
+            port: 11434
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: ollama-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+spec:
+  selector:
+    app: ollama
+  ports:
+  - name: http
+    port: 11434
+    targetPort: 11434
+"@ | Set-Content -Encoding UTF8 .\k8s\ollama.yaml
+
+Apply & watch
+-------------
+kubectl apply -f .\k8s\ollama.yaml
+kubectl get pods -w
+# Ctrl+C when ollama-... is Running
+
+Load a tiny model (inside pod)
+------------------------------
+kubectl exec deploy/ollama -- ollama pull tinyllama
+
+Quick generation (pipe avoids quoting issues)
+---------------------------------------------
+kubectl exec deploy/ollama -- sh -lc "printf '%s\n' 'Say hi from Kubernetes.' | ollama run tinyllama"
+
+In-cluster curl test
+--------------------
+kubectl -n kubechat run curl-ollama --rm -it --image=curlimages/curl:8.7.1 --restart=Never -- `
+  sh -lc "curl -sS http://ollama:11434/api/tags | head"
+
+
+===============================================================================
+D) POINT YOUR LOCAL rag-api TO KUBERNETES SERVICES
+===============================================================================
+
+Make sure rag-api has correct env (Compose override)
+----------------------------------------------------
+@"
+services:
+  rag-api:
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      QDRANT_URL: http://qdrant:6333
+      DOCS_DIR: /app/docs
+    depends_on:
+      - ollama
+      - qdrant
+"@ | Set-Content -Encoding UTF8 .\docker-compose.override.yml
+
+Recreate rag-api to pick env
+----------------------------
+docker compose rm -sf rag-api
+docker compose up -d rag-api
+
+Sanity from inside container
+----------------------------
+docker exec rag-api sh -lc 'echo OLLAMA=$OLLAMA_BASE_URL QDRANT=$QDRANT_URL'
+docker exec rag-api sh -lc 'curl -sS http://ollama:11434/api/tags | head'
+docker exec rag-api sh -lc 'curl -sS http://qdrant:6333/collections | head'
+# Both should print JSON
+
+
+===============================================================================
+E) SMOKE THE WHOLE PATH (RAG)
+===============================================================================
+
+Health
+------
+Invoke-RestMethod http://localhost:8000/health
+
+Re-ingest (safe repeat; no timeout for large PDFs)
+--------------------------------------------------
+Invoke-RestMethod -Method Post -TimeoutSec 0 http://localhost:8000/ingest
+
+Simple Q&A
+----------
+$body = @{
+  question    = "What is Kubernetes used for?"
+  top_k       = 6
+  num_predict = 160
+  num_gpu     = 32
+} | ConvertTo-Json -Compress
+Invoke-RestMethod -Uri http://localhost:8000/chat -Method Post -ContentType 'application/json' -Body $body
+
+File-specific Q&A
+-----------------
+$body = @{
+  question    = "Summarize this paper in 3 bullets."
+  top_k       = 6
+  num_predict = 160
+  num_gpu     = 32
+  path_exact  = "11.pdf"
+} | ConvertTo-Json -Compress
+Invoke-RestMethod -Uri http://localhost:8000/chat -Method Post -ContentType 'application/json' -Body $body
+
+
+===============================================================================
+F) OPTIONAL — DEPLOY rag-api INTO KUBERNETES (AND COPY DOCS)
+===============================================================================
+
+Create rag-api manifest
+-----------------------
+@"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rag-api }
+  template:
+    metadata:
+      labels: { app: rag-api }
+    spec:
+      containers:
+      - name: rag-api
+        image: rag-api:dev
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: OLLAMA_BASE_URL
+          value: http://ollama:11434
+        - name: QDRANT_URL
+          value: http://qdrant:6333
+        - name: DOCS_DIR
+          value: /app/docs
+        ports:
+        - containerPort: 8000
+        volumeMounts:
+        - name: docs
+          mountPath: /app/docs
+      volumes:
+      - name: docs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-api
+spec:
+  selector: { app: rag-api }
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+"@ | Set-Content -Encoding UTF8 .\k8s\rag-api.yaml
+
+Load the local image into minikube & apply
+------------------------------------------
+minikube image load rag-api:dev
+kubectl apply -f .\k8s\rag-api.yaml
+
+Port-forward (so your browser/UI still hits localhost)
+------------------------------------------------------
+kubectl port-forward svc/rag-api 8000:8000
+
+Copy your docs into the pod (since we used emptyDir)
+----------------------------------------------------
+$POD = kubectl get pod -l app=rag-api -o name
+kubectl cp .\docs "$POD":/app/ -c rag-api
+
+Index & query (k8s-hosted API)
+------------------------------
+Invoke-RestMethod -Method Post http://localhost:8000/ingest
+$body = @{question="What is Kubernetes used for?"; top_k=6; num_predict=160; num_gpu=32} |
+  ConvertTo-Json -Compress
+Invoke-RestMethod -Uri http://localhost:8000/chat -Method Post -ContentType 'application/json' -Body $body
+
+
+===============================================================================
+G) TROUBLESHOOTING (“Internal Server Error”)
+===============================================================================
+
+1) rag-api can’t reach Ollama/Qdrant
+------------------------------------
+• From container: docker exec rag-api curl -sSf http://ollama:11434/api/tags | head
+• From container: docker exec rag-api curl -sSf http://qdrant:6333/collections | head
+• If these fail, env vars weren’t injected. Recreate rag-api after updating override:
+  docker compose rm -sf rag-api && docker compose up -d rag-api
+
+2) Ingest returns 500
+---------------------
+• Check rag-api logs: docker logs -f rag-api
+• Ensure /app/docs has files:
+  docker exec -it rag-api sh -lc 'ls -R /app/docs'
+  # If deploying rag-api in k8s, remember to kubectl cp docs into the pod (or mount a PVC).
+
+3) Ollama generate/embeddings time out
+--------------------------------------
+• Verify a small model exists in k8s:
+  kubectl exec deploy/ollama -- ollama pull tinyllama
+  # For embeddings:
+  kubectl exec deploy/ollama -- ollama pull nomic-embed-text
+• Check readiness:
+  kubectl get deploy/ollama
+  kubectl logs deploy/ollama
+
+4) JSON quoting weirdness (PowerShell)
+--------------------------------------
+• Run through sh -lc and a pipe:
+  kubectl run curl-ollama --rm -it --image=curlimages/curl:8.7.1 --restart=Never -- `
+    sh -lc "printf '%s\n' '{\"model\":\"tinyllama\",\"prompt\":\"Hi\"}' | \
+    curl -sS -H 'Content-Type: application/json' --data-binary @- http://ollama:11434/api/generate"
+
+5) Minikube can’t pull images (proxy warning)
+---------------------------------------------
+• If you see “Failing to connect to https://registry.k8s.io/”, set proxy env for minikube if required:
+  https://minikube.sigs.k8s.io/docs/reference/networking/proxy/
+
+
+===============================================================================
+PHASE 5 OUTCOME
+===============================================================================
+
+You now have Qdrant and Ollama running inside Kubernetes with a persistent models
+volume, verified in-cluster with curl, and reachable by your existing rag-api.
+Optionally, you’ve deployed rag-api to Kubernetes and copied docs into the pod,
+so the entire pipeline can run inside the cluster.
+
+NEXT (Phase 6): Add an Ingress with TLS, ConfigMaps/Secrets for config, and (if
+your host supports it) the NVIDIA k8s device plugin to schedule GPU to pods.

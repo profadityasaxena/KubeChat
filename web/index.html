@@ -1,165 +1,271 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>KubeChat</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    h1 { margin: 0 0 0.5rem 0; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    textarea, input, button { width: 100%; padding: .6rem .7rem; font-size: 1rem; }
-    textarea { min-height: 120px; }
-    button { cursor: pointer; }
-    .small { font-size: .9rem; color: #555; }
-    .muted { color: #777; }
-    .ok { color: #0a0; }
-    .bad { color: #b00; }
-    .card { border: 1px solid #eee; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
-    .sources { margin-top: .5rem; }
-    code { background: #f6f6f6; padding: .2rem .35rem; border-radius: 4px; }
-  </style>
+  <title>KubeChat · RAG Console</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>KubeChat</h1>
-  <div id="health" class="small muted">API: checking…</div>
+  <!-- APP WRAPPER -->
+  <div class="app">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="orb"></div>
+        <div>
+          <h1>KubeChat</h1>
+          <span class="pill">RAG Console</span>
+        </div>
+      </div>
 
-  <div class="card">
-    <label for="q"><strong>Question</strong></label>
-    <textarea id="q" placeholder="Ask something about your PDFs… e.g. 'What is Kubernetes used for?'"></textarea>
+      <div class="panel">
+        <label class="label">API URL</label>
+        <div class="input-with-leading">
+          <svg class="i i-link" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.9 12a5 5 0 0 1 5-5h3v2h-3a3 3 0 0 0 0 6h3v2h-3a5 5 0 0 1-5-5Zm6-1h4v2h-4v-2Zm5.2-4h-3v2h3a3 3 0 0 1 0 6h-3v2h3a5 5 0 0 0 0-10Z"/></svg>
+          <input id="api" type="url" value="http://localhost:8000" spellcheck="false" />
+        </div>
+        <div class="health">
+          <span id="health-dot" class="dot dot-warn"></span>
+          <span id="health-text">Checking API…</span>
+          <button id="check" class="btn btn-ghost small">Check</button>
+        </div>
+      </div>
 
-    <div class="row" style="margin-top:.5rem">
-      <div>
-        <label for="path_contains" class="small">Path contains (optional)</label>
-        <input id="path_contains" placeholder="e.g. 11.pdf or Kubernetes" />
+      <div class="panel">
+        <div class="panel-title">Retrieval</div>
+        <div class="grid-2">
+          <div>
+            <label class="label">Top-K</label>
+            <input id="top_k" type="range" min="1" max="20" value="6" />
+            <div class="range-val" id="top_k_val">6</div>
+          </div>
+          <div>
+            <label class="label">Max Tokens</label>
+            <input id="num_predict" type="range" min="32" max="1024" value="160" />
+            <div class="range-val" id="num_predict_val">160</div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div>
+            <label class="label">GPU Layers</label>
+            <input id="num_gpu" type="range" min="1" max="64" value="32" />
+            <div class="range-val" id="num_gpu_val">32</div>
+          </div>
+          <div>
+            <label class="label">Path Filter</label>
+            <div class="tabs tiny" role="tablist" aria-label="Path filter mode">
+              <button class="tab active" data-mode="contains">Contains</button>
+              <button class="tab" data-mode="exact">Exact</button>
+            </div>
+            <input id="path_filter" placeholder="e.g., 11.pdf or Kubernetes" />
+          </div>
+        </div>
       </div>
-      <div>
-        <label for="path_exact" class="small">Path exact (optional)</label>
-        <input id="path_exact" placeholder="e.g. 11.pdf" />
-      </div>
-    </div>
 
-    <div class="row" style="margin-top:.5rem">
-      <div>
-        <label for="top_k" class="small">top_k</label>
-        <input id="top_k" type="number" value="6" min="1" max="50" />
+      <div class="panel">
+        <div class="panel-title">Index</div>
+        <div class="row">
+          <button id="reingest" class="btn w-100">
+            <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6V3l-4 4 4 4V8c2.8 0 5 2.2 5 5a5 5 0 0 1-8.5 3.5l-1.4 1.4A7 7 0 0 0 19 13c0-3.9-3.1-7-7-7Z"/></svg>
+            Re-ingest
+          </button>
+        </div>
+        <div id="index-status" class="muted tiny">Idle</div>
       </div>
-      <div>
-        <label for="num_predict" class="small">num_predict</label>
-        <input id="num_predict" type="number" value="160" min="1" max="2048" />
-      </div>
-    </div>
 
-    <div class="row" style="margin-top:.5rem">
-      <div>
-        <label for="num_gpu" class="small">num_gpu</label>
-        <input id="num_gpu" type="number" value="32" min="1" max="64" />
-      </div>
-      <div class="small muted" style="display:flex;align-items:flex-end">
-        Tip: leave <code>path_contains</code> empty to search all files.
-      </div>
-    </div>
+      <footer class="sidebar-foot tiny">
+        <span>Tips: <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to Ask · <kbd>Esc</kbd> to Clear</span>
+      </footer>
+    </aside>
 
-    <div style="margin-top:.75rem; display:flex; gap:.5rem">
-      <button id="ask">Ask</button>
-      <button id="reingest" title="Scan /app/docs and rebuild the index">Re-ingest</button>
-      <div id="status" class="small muted" style="margin-left:.5rem"></div>
-    </div>
+    <!-- MAIN -->
+    <main class="main">
+      <!-- COMMAND BAR -->
+      <div class="cmdbar glass">
+        <div class="input-wrap">
+          <textarea id="q" rows="2" placeholder="Ask about your PDFs… e.g., “What is Kubernetes used for?”"></textarea>
+          <div class="input-actions">
+            <button id="clear" class="btn btn-ghost" title="Clear (Esc)">
+              <svg class="i" viewBox="0 0 24 24"><path d="M6 19 19 6M6 6l13 13"/></svg>
+            </button>
+            <button id="ask" class="btn btn-primary" title="Ask (Ctrl+Enter)">
+              <svg class="i" viewBox="0 0 24 24"><path d="M3 12l18-9-4 9 4 9-18-9Z"/></svg>
+              Ask
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STREAM AREA -->
+      <section id="stream" class="stream">
+        <!-- Messages will be appended here -->
+        <div class="empty">
+          <div class="empty-orb"></div>
+          <h2>Ready when you are</h2>
+          <p class="muted">Type a question above or re-ingest your docs from the sidebar.</p>
+        </div>
+      </section>
+    </main>
   </div>
 
-  <div id="answer" class="card" style="display:none"></div>
-  <div id="sources" class="card" style="display:none"></div>
+  <!-- TOAST -->
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script>
-    const API = 'http://localhost:8000';
+    // ---------- Helpers ----------
+    const $ = (sel, el=document) => el.querySelector(sel);
+    const $$ = (sel, el=document) => [...el.querySelectorAll(sel)];
+    const API = () => $('#api').value.trim().replace(/\/+$/,'');
+    const toast = (msg,type='info') => {
+      const t = $('#toast'); t.textContent = msg; t.dataset.type = type; t.classList.add('show');
+      setTimeout(()=>t.classList.remove('show'), 2000);
+    };
 
+    const setHealth = (ok, text) => {
+      $('#health-dot').className = 'dot ' + (ok ? 'dot-ok' : 'dot-bad');
+      $('#health-text').textContent = text || (ok ? 'API: ok' : 'API: unreachable');
+    };
+
+    const setRangeVal = (id) => $(`#${id}_val`).textContent = $(`#${id}`).value;
+    ['top_k','num_predict','num_gpu'].forEach(id => {
+      $(`#${id}`).addEventListener('input', () => setRangeVal(id));
+      setRangeVal(id);
+    });
+
+    // Tabs for path filter
+    let pathMode = 'contains';
+    $$('.tab').forEach(b=>{
+      b.addEventListener('click',()=>{
+        $$('.tab').forEach(x=>x.classList.remove('active'));
+        b.classList.add('active');
+        pathMode = b.dataset.mode;
+        $('#path_filter').placeholder = pathMode==='exact' ? 'e.g., 11.pdf' : 'e.g., Kubernetes or 11.pdf';
+      });
+    });
+
+    // ---------- Health ----------
     async function checkHealth() {
       try {
-        const r = await fetch(API + '/health');
-        const ok = r.ok;
-        document.getElementById('health').textContent = 'API: ' + (ok ? 'ok' : 'unreachable');
-        document.getElementById('health').className = 'small ' + (ok ? 'ok' : 'bad');
+        const r = await fetch(API() + '/health', {cache:'no-store'});
+        setHealth(r.ok, r.ok ? 'API: ok' : 'API: error');
       } catch {
-        document.getElementById('health').textContent = 'API: unreachable';
-        document.getElementById('health').className = 'small bad';
+        setHealth(false, 'API: unreachable');
       }
     }
+    $('#check').addEventListener('click', checkHealth);
     checkHealth();
 
-    function setBusy(isBusy, msg='') {
-      const btn = document.getElementById('ask');
-      const ri  = document.getElementById('reingest');
-      btn.disabled = isBusy; ri.disabled = isBusy;
-      document.getElementById('status').textContent = msg || (isBusy ? 'working…' : '');
-    }
+    // ---------- Rendering ----------
+    const stream = $('#stream');
+    const makeMsg = (role, html) => {
+      const li = document.createElement('article');
+      li.className = `msg ${role}`;
+      li.innerHTML = `
+        <div class="msg-avatar">${role==='user' ? '🧑' : '🤖'}</div>
+        <div class="msg-body">${html}</div>
+      `;
+      stream.classList.remove('has-empty');
+      $('.empty', stream)?.remove();
+      stream.appendChild(li);
+      stream.scrollTo({ top: stream.scrollHeight, behavior:'smooth' });
+      return li;
+    };
 
-    function showAnswer(text) {
-      const box = document.getElementById('answer');
-      box.style.display = 'block';
-      box.innerHTML = '<h3>Answer</h3><div>' + (text || '').replace(/\n/g,'<br/>') + '</div>';
-    }
+    const renderAnswer = (text, sources) => {
+      const srcHtml = (sources||[]).map(s => `
+        <div class="src-card">
+          <div class="src-path" title="${s.path || ''}">${s.path || '(unknown)'}</div>
+          <div class="src-meta">chunk ${s.chunk_id ?? '–'} • score ${typeof s.score==='number' ? s.score.toFixed(3) : s.score}</div>
+        </div>`).join('');
+      return `
+        <div class="answer">${(text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</div>
+        ${sources?.length ? `<div class="sources-wrap"><h4>Sources</h4><div class="src-grid">${srcHtml}</div></div>` : ''}
+        <div class="answer-actions">
+          <button class="btn btn-ghost small" data-copy>Copy</button>
+          <button class="btn btn-ghost small" data-json>JSON</button>
+        </div>
+      `;
+    };
 
-    function showSources(list) {
-      const box = document.getElementById('sources');
-      if (!list || !list.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
-      box.style.display = 'block';
-      const items = list.map(s => {
-        const p = s.path ?? '';
-        const id = (s.chunk_id ?? '');
-        const sc = (typeof s.score === 'number') ? s.score.toFixed(3) : s.score;
-        return '<li><code>' + p + '</code> (chunk ' + id + ', score ' + sc + ')</li>';
-      }).join('');
-      box.innerHTML = '<h3>Sources</h3><ul class="sources">' + items + '</ul>';
-    }
+    const attachAnswerActions = (node, payload, data) => {
+      $('[data-copy]', node)?.addEventListener('click', async ()=>{
+        const txt = $('.answer', node)?.innerText || '';
+        await navigator.clipboard.writeText(txt);
+        toast('Answer copied','ok');
+      });
+      $('[data-json]', node)?.addEventListener('click', ()=>{
+        const blob = new Blob([JSON.stringify({request:payload,response:data},null,2)], {type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'kubechat-response.json'; a.click();
+        URL.revokeObjectURL(url);
+      });
+    };
 
-    document.getElementById('ask').addEventListener('click', async () => {
-      const q  = document.getElementById('q').value.trim();
-      const pc = document.getElementById('path_contains').value.trim();
-      const pe = document.getElementById('path_exact').value.trim();
-      const top_k = parseInt(document.getElementById('top_k').value || '6', 10);
-      const num_predict = parseInt(document.getElementById('num_predict').value || '160', 10);
-      const num_gpu = parseInt(document.getElementById('num_gpu').value || '32', 10);
+    // ---------- Actions ----------
+    async function ask() {
+      const q = $('#q').value.trim();
+      if (!q) { toast('Type a question','warn'); $('#q').focus(); return; }
 
-      if (!q) { alert('Please type a question.'); return; }
+      const payload = {
+        question: q,
+        top_k: parseInt($('#top_k').value,10),
+        num_predict: parseInt($('#num_predict').value,10),
+        num_gpu: parseInt($('#num_gpu').value,10)
+      };
+      const filt = $('#path_filter').value.trim();
+      if (filt) (pathMode==='exact') ? payload.path_exact = filt : payload.path_contains = filt;
 
-      const payload = { question: q, top_k, num_predict, num_gpu };
-      if (pe) payload.path_exact = pe;
-      if (pc) payload.path_contains = pc;
-
-      setBusy(true, 'waiting…');
-      showAnswer(''); showSources([]);
+      const user = makeMsg('user', q.replace(/</g,'&lt;'));
+      const bot = makeMsg('bot', `<div class="typing"><span></span><span></span><span></span></div>`);
 
       try {
-        const r = await fetch(API + '/chat', {
+        const r = await fetch(API() + '/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {'Content-Type':'application/json'},
           body: JSON.stringify(payload)
         });
         const data = await r.json();
-        if (!r.ok) throw new Error(JSON.stringify(data));
-        showAnswer(data.answer || '(no answer)');
-        showSources(data.sources || []);
-        setBusy(false, '');
+        if (!r.ok) throw new Error(data?.detail || 'Request failed');
+        bot.querySelector('.msg-body').innerHTML = renderAnswer(data.answer, data.sources);
+        attachAnswerActions(bot, payload, data);
       } catch (e) {
-        console.error(e);
-        showAnswer('Request failed. See console for details.');
-        setBusy(false, 'error');
+        bot.querySelector('.msg-body').innerHTML = `<div class="error">⚠️ ${e.message || e}</div>`;
       }
+    }
+
+    async function reingest() {
+      $('#index-status').textContent = 'Indexing…';
+      $('#reingest').disabled = true;
+      try {
+        const r = await fetch(API() + '/ingest', { method:'POST' });
+        const j = await r.json();
+        $('#index-status').textContent = `Indexed files: ${j.files_indexed} · Chunks: ${j.chunks_indexed}`;
+        toast('Ingest complete','ok');
+      } catch {
+        $('#index-status').textContent = 'Re-ingest failed';
+        toast('Re-ingest failed','bad');
+      } finally {
+        $('#reingest').disabled = false;
+      }
+    }
+
+    // Events
+    $('#ask').addEventListener('click', ask);
+    $('#reingest').addEventListener('click', reingest);
+    $('#clear').addEventListener('click', ()=>{
+      $('#q').value = '';
+      $('#q').focus();
+    });
+    // Hotkeys
+    window.addEventListener('keydown', (e)=>{
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') ask();
+      if (e.key === 'Escape') { $('#q').value=''; $('#q').focus(); }
     });
 
-    document.getElementById('reingest').addEventListener('click', async () => {
-      setBusy(true, 're-ingesting…');
-      try {
-        const r = await fetch(API + '/ingest', { method: 'POST' });
-        const data = await r.json();
-        document.getElementById('status').textContent = 'indexed files: ' + data.files_indexed + ', chunks: ' + data.chunks_indexed;
-      } catch (e) {
-        console.error(e);
-        document.getElementById('status').textContent = 're-ingest failed';
-      } finally {
-        setBusy(false, '');
-      }
-    });
+    // Initial empty state class
+    stream.classList.add('has-empty');
   </script>
 </body>
 </html>

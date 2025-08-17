@@ -1,0 +1,441 @@
+PHASE 2 — GPU-ACCELERATED RAG API WITH QDRANT + OLLAMA
+(FastAPI microservice that ingests your PDFs/notes and answers grounded questions)
+
+GOAL
+-----
+Turn your Phase 1 lab into a working Retrieval-Augmented Generation (RAG) stack:
+• Containerized FastAPI “rag-api” service
+• Vector store (Qdrant) for semantic search
+• Ollama (GPU) for embeddings + generation
+• One-command ingestion from ./docs and a clean /chat API
+
+OUTCOMES
+--------
+• Reproducible project scaffold and Docker image
+• Verified ingestion of .txt/.md/.pdf into Qdrant
+• End-to-end query flow: Question → Retrieve → Generate → Sources
+
+PREREQUISITES
+-------------
+• Phase 1 completed (Ollama GPU container working)
+• Windows 11 + WSL2 + Docker Desktop
+• NVIDIA GPU with WSL driver enabled
+• PowerShell terminal with project root as CWD
+
+TIP: Use a user-defined Docker network so containers discover each other by name.
+
+---------------------------------------------------------------------------
+PROJECT SCAFFOLD & CONFIG
+---------------------------------------------------------------------------
+
+Create directories
+------------------
+PowerShell (at project root):
+    mkdir -Force -Path "services\rag-api\app"
+    mkdir -Force -Path "docs"
+    Get-ChildItem -Name
+
+Create .env
+-----------
+    @"
+    OLLAMA_BASE_URL=http://ollama:11434
+    QDRANT_URL=http://qdrant:6333
+    COLLECTION_NAME=docs
+    EMBEDDING_MODEL=nomic-embed-text
+    GENERATION_MODEL=llama3:8b-instruct-q4_K_M
+    CHUNK_SIZE=800
+    CHUNK_OVERLAP=200
+    "@ | Set-Content -Encoding UTF8 .env
+
+    Get-Content .env
+
+Add FastAPI app (main.py)
+-------------------------
+    @'
+    from __future__ import annotations
+    import os, uuid, pathlib, json
+    from typing import List, Dict, Any
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from pydantic import BaseModel
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct
+    import httpx
+
+    # --- Config ---
+    OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    COLLECTION = os.environ.get("COLLECTION_NAME", "docs")
+    EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+    GEN_MODEL = os.environ.get("GENERATION_MODEL", "llama3:8b-instruct-q4_K_M")
+    DOCS_DIR = os.environ.get("DOCS_DIR", "/app/docs")
+    CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "800"))
+    CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
+
+    app = FastAPI(title="RAG API", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    )
+
+    # --- Utilities ---
+    async def ollama_embed(client: httpx.AsyncClient, text: str) -> List[float]:
+        r = await client.post(f"{OLLAMA_BASE}/api/embeddings",
+                              json={"model": EMBED_MODEL, "prompt": text})
+        r.raise_for_status()
+        return r.json()["embedding"]
+
+    async def ensure_collection(qc: QdrantClient, client: httpx.AsyncClient) -> int:
+        dim = len(await ollama_embed(client, "dimension probe"))
+        names = [c.name for c in qc.get_collections().collections]
+        if COLLECTION not in names:
+            qc.recreate_collection(
+                collection_name=COLLECTION,
+                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+            )
+        return dim
+
+    def read_text(path: pathlib.Path) -> str:
+        text = ""
+        if path.suffix.lower() in [".txt", ".md"]:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        elif path.suffix.lower() == ".pdf":
+            try:
+                from pypdf import PdfReader
+                r = PdfReader(str(path))
+                text = "\n".join(p.extract_text() or "" for p in r.pages)
+            except Exception as e:
+                text = f"[PDF parse error: {e}]"
+        return text
+
+    def chunk_text(s: str, size: int, overlap: int) -> List[str]:
+        s = " ".join(s.split())
+        if not s: return []
+        chunks, start = [], 0
+        while start < len(s):
+            end = min(start + size, len(s))
+            chunks.append(s[start:end])
+            if end == len(s): break
+            start = max(0, end - overlap)
+        return chunks
+
+    # --- Models ---
+    class IngestResponse(BaseModel):
+        files_indexed: int
+        chunks_indexed: int
+
+    class ChatRequest(BaseModel):
+        question: str
+        top_k: int = 5
+        num_predict: int = 256
+        num_gpu: int = 32
+
+    class ChatResponse(BaseModel):
+        answer: str
+        sources: List[Dict[str, Any]]
+
+    # --- Routes ---
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.post("/ingest", response_model=IngestResponse)
+    async def ingest():
+        docs_path = pathlib.Path(DOCS_DIR)
+        files = [p for p in docs_path.rglob("*") if p.is_file() and p.suffix.lower() in [".txt", ".md", ".pdf"]]
+        if not files:
+            return IngestResponse(files_indexed=0, chunks_indexed=0)
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            qc = QdrantClient(url=QDRANT_URL)
+            await ensure_collection(qc, client)
+
+            total_chunks = 0
+            for f in files:
+                raw = read_text(f)
+                if not raw: continue
+                chunks = chunk_text(raw, CHUNK_SIZE, CHUNK_OVERLAP)
+                points = []
+                for i, ch in enumerate(chunks):
+                    emb = await ollama_embed(client, ch)
+                    points.append(PointStruct(
+                        id=uuid.uuid4().hex,
+                        vector=emb,
+                        payload={"path": str(f.relative_to(docs_path)), "chunk_id": i, "text": ch},
+                    ))
+                if points:
+                    qc.upsert(collection_name=COLLECTION, points=points)
+                    total_chunks += len(points)
+
+        return IngestResponse(files_indexed=len(files), chunks_indexed=total_chunks)
+
+    @app.post("/chat", response_model=ChatResponse)
+    async def chat(req: ChatRequest):
+        async with httpx.AsyncClient(timeout=None) as client:
+            qc = QdrantClient(url=QDRANT_URL)
+            q_emb = await ollama_embed(client, req.question)
+            search = qc.search(collection_name=COLLECTION, query_vector=q_emb, limit=req.top_k, with_payload=True)
+
+            contexts, sources = [], []
+            for hit in search:
+                payload = hit.payload or {}
+                contexts.append(payload.get("text", ""))
+                sources.append({"path": payload.get("path"), "chunk_id": payload.get("chunk_id"), "score": hit.score})
+
+            system = ("You are a helpful assistant. Use the provided CONTEXT strictly. "
+                      "If the answer isn't in the context, say you don't know.")
+            context_block = "\n\n".join(f"Snippet {i+1}:\n{c}" for i, c in enumerate(contexts))
+            prompt = f"SYSTEM:\n{system}\n\nCONTEXT:\n{context_block}\n\nUSER QUESTION:\n{req.question}\n\nASSISTANT:"
+
+            resp = await client.post(f"{OLLAMA_BASE}/api/generate", json={
+                "model": GEN_MODEL,
+                "prompt": prompt,
+                "options": {"num_predict": req.num_predict, "num_gpu": req.num_gpu}
+            })
+            resp.raise_for_status()
+
+            answer_parts = []
+            for line in resp.iter_lines():
+                if not line: continue
+                data = json.loads(line)
+                if "response" in data: answer_parts.append(data["response"])
+                if data.get("done"): break
+
+            return ChatResponse(answer="".join(answer_parts).strip(), sources=sources)
+    '@ | Set-Content -Encoding UTF8 "services\rag-api\app\main.py"
+
+Create requirements.txt
+-----------------------
+    @"
+    fastapi==0.111.0
+    uvicorn[standard]==0.30.0
+    httpx==0.27.0
+    qdrant-client==1.8.2
+    pydantic==2.7.3
+    pypdf==4.2.0
+    "@ | Set-Content -Encoding UTF8 "services\rag-api\requirements.txt"
+
+    Get-Content "services\rag-api\requirements.txt"
+
+Create Dockerfile
+-----------------
+    @"
+    FROM python:3.11-slim
+
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential curl ca-certificates && \
+        rm -rf /var/lib/apt/lists/*
+
+    WORKDIR /app
+    COPY services/rag-api/requirements.txt .
+    RUN pip install --no-cache-dir -r requirements.txt
+
+    COPY services/rag-api/app ./app
+    ENV DOCS_DIR=/app/docs
+    EXPOSE 8000
+
+    CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    "@ | Set-Content -Encoding UTF8 "services\rag-api\Dockerfile"
+
+    Get-Content "services\rag-api\Dockerfile"
+
+Build the image
+---------------
+    docker build -t rag-api:dev -f "services\rag-api\Dockerfile" .
+
+---------------------------------------------------------------------------
+RUNTIME WIRING (NETWORK, SERVICES, MOUNTS)
+---------------------------------------------------------------------------
+
+Create a user-defined network
+-----------------------------
+    docker network create labnet
+
+Run/attach Ollama on labnet (if Phase 1 container exists, connect it)
+---------------------------------------------------------------------
+If you already have an “ollama” container:
+    docker network connect labnet ollama
+
+Otherwise (create fresh):
+    docker rm -f ollama 2>$null
+    docker run --gpus=all -d --name ollama \
+      --network labnet \
+      -p 11434:11434 \
+      -v ollama:/root/.ollama \
+      ollama/ollama
+
+Run Qdrant (vector DB) on labnet
+--------------------------------
+    docker rm -f qdrant 2>$null
+    docker run -d --name qdrant \
+      --network labnet \
+      -p 6333:6333 \
+      -v qdrant_storage:/qdrant/storage \
+      qdrant/qdrant:latest
+
+Prepare documents to ingest
+---------------------------
+Place your source files in:
+    .\docs
+Accepted types: .txt, .md, .pdf
+
+Run rag-api with env + docs mount
+---------------------------------
+    docker rm -f rag-api 2>$null
+    docker run -d --name rag-api \
+      --network labnet \
+      --env-file .env \
+      -p 8000:8000 \
+      -v "${PWD}\docs:/app/docs" \
+      rag-api:dev
+
+Health check (wait loop)
+------------------------
+    docker exec rag-api sh -lc 'for i in $(seq 1 60); do curl -sf http://127.0.0.1:8000/health >/dev/null && { echo READY; exit 0; }; sleep 0.5; done; echo NOT_READY; exit 1'
+
+---------------------------------------------------------------------------
+INGESTION & QUERY (END-TO-END)
+---------------------------------------------------------------------------
+
+Ingest all docs
+---------------
+    docker exec rag-api sh -lc 'curl -sS -X POST http://127.0.0.1:8000/ingest'
+
+Expected JSON:
+    {"files_indexed": N, "chunks_indexed": M}
+
+Ask a question (RAG)
+--------------------
+    docker exec rag-api sh -lc 'curl -sS -H "Content-Type: application/json" \
+      --data-raw "{\"question\":\"Summarize this paper in 3 bullets.\",\"top_k\":6,\"num_predict\":160,\"num_gpu\":32}" \
+      http://127.0.0.1:8000/chat'
+
+You’ll receive:
+• answer: grounded output
+• sources: file paths + chunk ids + similarity scores
+
+View service logs (debug)
+-------------------------
+    docker logs -f rag-api
+    docker logs -f qdrant
+    docker logs -f ollama | grep -i offload
+
+---------------------------------------------------------------------------
+TUNING & OPS
+---------------------------------------------------------------------------
+
+Adjust chunking
+---------------
+Update CHUNK_SIZE / CHUNK_OVERLAP in .env, then:
+    docker restart rag-api
+    # Re-ingest to rebuild vectors
+    docker exec rag-api sh -lc 'curl -sS -X POST http://127.0.0.1:8000/ingest'
+
+Switch models
+-------------
+In .env:
+    EMBEDDING_MODEL=nomic-embed-text
+    GENERATION_MODEL=llama3:8b-instruct-q4_K_M   # or tinyllama / llama3.2:1b-instruct etc.
+
+Restart API:
+    docker restart rag-api
+
+Performance tips
+----------------
+• Increase top_k for broader recall; reduce for speed.
+• Use quantized generation models for VRAM-limited GPUs.
+• Monitor GPU utilization while generating:
+    watch -n 1 nvidia-smi
+
+---------------------------------------------------------------------------
+TROUBLESHOOTING
+---------------------------------------------------------------------------
+
+rag-api can’t reach ollama or qdrant
+------------------------------------
+• Ensure all three containers are on the same network:
+    docker network inspect labnet | findstr ollama
+    docker network inspect labnet | findstr qdrant
+    docker network inspect labnet | findstr rag-api
+• Verify .env uses service names on the network:
+    OLLAMA_BASE_URL=http://ollama:11434
+    QDRANT_URL=http://qdrant:6333
+
+Ingestion shows 0 files
+-----------------------
+• Confirm your files are in .\docs
+• Confirm the mount is active inside the container:
+    docker exec -it rag-api sh -lc 'ls -R /app/docs'
+
+Poor answers or “I don’t know”
+------------------------------
+• Increase top_k (e.g., 8–10)
+• Increase CHUNK_SIZE (e.g., 1000) for longer context slices
+• Verify PDFs extract text (scanned PDFs may need OCR)
+• Re-run ingestion after changes
+
+GPU not utilized during generation
+----------------------------------
+• Confirm Phase 1 GPU setup (nvidia-smi shows activity)
+• Use a GPU-capable model (e.g., llama3:8b-instruct-q4_K_M)
+• Check Ollama logs for offload hints:
+    docker logs -f ollama | grep -i offload
+
+---------------------------------------------------------------------------
+CLEANUP
+---------------------------------------------------------------------------
+
+Stop and remove services
+------------------------
+    docker rm -f rag-api qdrant
+(Keep persistent data)
+    docker volume ls
+    # Optional: docker volume rm qdrant_storage
+
+Keep or reset Ollama container
+------------------------------
+    # Keep:
+    docker stop ollama
+    # Reset (removes models volume):
+    docker rm -f ollama
+    docker volume rm ollama
+
+---------------------------------------------------------------------------
+PHASE 2 OUTCOME
+---------------------------------------------------------------------------
+
+You now have:
+• A containerized FastAPI RAG microservice
+• Vector search via Qdrant populated from ./docs
+• GPU-accelerated embeddings + generation via Ollama
+• Clean health/ingest/chat endpoints and reproducible runtime wiring
+
+NEXT: Phase 3 will move this stack into Kubernetes:
+• Qdrant + Ollama + rag-api as Deployments/Services
+• PersistentVolumes for data and models
+• NVIDIA device plugin for GPU scheduling
+• Ingress and TLS for external access
+
+---------------------------------------------------------------------------
+APPENDIX — QUICK COMMANDS
+---------------------------------------------------------------------------
+
+Network & services
+  docker network create labnet
+  docker run -d --name qdrant --network labnet -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant:latest
+  docker run --gpus=all -d --name ollama --network labnet -p 11434:11434 -v ollama:/root/.ollama ollama/ollama
+
+Build & run API
+  docker build -t rag-api:dev -f services\rag-api\Dockerfile .
+  docker run -d --name rag-api --network labnet --env-file .env -p 8000:8000 -v "${PWD}\docs:/app/docs" rag-api:dev
+
+Health, ingest, chat
+  docker exec rag-api sh -lc 'curl -sSf http://127.0.0.1:8000/health'
+  docker exec rag-api sh -lc 'curl -sS -X POST http://127.0.0.1:8000/ingest'
+  docker exec rag-api sh -lc 'curl -sS -H "Content-Type: application/json" --data-raw "{\"question\":\"Summarize this paper in 3 bullets.\",\"top_k\":6,\"num_predict\":160,\"num_gpu\":32}" http://127.0.0.1:8000/chat'
+
+Logs & monitoring
+  docker logs -f rag-api
+  docker logs -f qdrant
+  docker logs -f ollama | grep -i offload
+  watch -n 1 nvidia-smi
