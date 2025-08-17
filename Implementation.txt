@@ -1,68 +1,89 @@
-# Setting Up WSL2, Docker, and Kubernetes on Windows
+# WSL2, Docker, and Kubernetes Setup Guide for Windows
 
-Follow these steps to set up a local Kubernetes development environment using WSL2, Docker Desktop, kubectl, and minikube.
+This guide walks you through setting up a local Kubernetes development environment on Windows using WSL2, Docker Desktop, kubectl, and minikube.
 
 ---
 
 ## 1. Install WSL2 and Ubuntu
 
-Open PowerShell and run the following command to install WSL2 with Ubuntu:
-
+Open PowerShell and run:
     wsl --install -d Ubuntu
 
 ## 2. Verify WSL Version
 
-Check which version of WSL your Ubuntu distribution is using:
-
+Check your WSL version:
     wsl -l -v
 
-If Ubuntu is not using Version 2, set it manually:
-
+If Ubuntu is not using Version 2, set it:
     wsl --set-version Ubuntu 2
 
 ## 3. Install Docker Desktop
 
-Download and install Docker Desktop for Windows. Make sure to enable the WSL2 backend during installation.
+Download and install Docker Desktop for Windows. During installation, enable the WSL2 backend.
 
-After installation, verify Docker is working:
-
+Verify Docker installation:
     docker --version
     docker run hello-world
 
 ## 4. Install kubectl
 
-Use Windows Package Manager (winget) to install kubectl, the Kubernetes command-line tool:
-
+Install kubectl using Windows Package Manager:
     winget install -e --id Kubernetes.kubectl
 
-Check the installation:
-
+Verify installation:
     kubectl version --client
 
 ## 5. Install minikube
 
-Install minikube, which lets you run a local Kubernetes cluster:
-
+Install minikube:
     winget install -e --id Kubernetes.minikube
 
 ## 6. Start a Local Kubernetes Cluster
 
-Start minikube using Docker as the driver:
-
+Start minikube with Docker as the driver:
     minikube start --driver=docker
 
-Verify your cluster is running:
-
+Verify your cluster:
     kubectl get nodes
 
 ---
 
-You now have a local Kubernetes cluster running on Windows using WSL2 and Docker Desktop.
+You now have a local Kubernetes cluster running on Windows with WSL2 and Docker Desktop.
 
-# try the standard shim first
-nvidia-smi
+---
 
-# if that isn't found, use the built-in WSL path:
-ls -l /usr/lib/wsl/lib/nvidia-smi
-/usr/lib/wsl/lib/nvidia-smi
+## GPU Support in WSL2
 
+Check for NVIDIA GPU support:
+
+Standard check:
+    nvidia-smi
+
+If not found, try the WSL path:
+    ls -l /usr/lib/wsl/lib/nvidia-smi
+    /usr/lib/wsl/lib/nvidia-smi
+
+## Enable Docker-WSL Integration
+
+List Docker contexts:
+    docker context ls
+
+You should see a context like `desktop-linux` (the default is marked with *).
+
+## Test GPU Access in Docker
+
+Run a CUDA test container:
+    docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+
+## Run Ollama in Docker with GPU Enabled
+
+Start Ollama:
+    docker run --gpus=all -d \
+      -p 11434:11434 \
+      -v ollama:/root/.ollama \
+      --name ollama \
+      ollama/ollama
+
+Check the API:
+    curl http://localhost:11434/api/tags
+    # Should return JSON (possibly empty until you pull a model)
